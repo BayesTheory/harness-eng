@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Credenciais. .env.example e versionado; .env nunca.
+.env
+.env.local
+
+# Transcripts NUNCA entram no repositorio: sao o trabalho real do usuario, com caminhos
+# de projeto, conteudo de comando e nome de cliente. As ferramentas os leem localmente.
+*.jsonl
+traces/
+transcripts/
+
+# Saidas de relatorio: podem conter os mesmos dados dos transcripts.
+reports/
+out/
+*.report.html
+*.report.json
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.vscode/
+.idea/
+.DS_Store
