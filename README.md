@@ -4,7 +4,7 @@ Ferramentas para **medir** harnesses de agente.
 
 O campo de harness engineering hoje é anedótico: "esse prompt parece melhor", "esse loop parece mais estável". Quase ninguém publica intervalo de confiança, quase ninguém pareia, e praticamente ninguém sabe quantas execuções precisaria rodar para a comparação significar alguma coisa.
 
-Este repositório é a parte que falta: um formato de trace agnóstico, métricas que rodam sobre ele, e uma camada estatística feita para as distribuições que este domínio realmente tem — assimétricas, com cauda pesada, e onde teste `t` dá resposta errada com aparência de precisão.
+Este repositório é a parte que falta: um formato de trace agnóstico, métricas que rodam sobre ele, e uma camada estatística cujas escolhas foram **medidas em vez de supostas** — inclusive quando a medição contradisse o que eu tinha escrito.
 
 ---
 
@@ -38,7 +38,7 @@ harness-eng power                      # quantas tarefas para detectar uma melho
 harness-eng compare atual.json novo.json --metric "custo/sessão"
 ```
 
-O núcleo **não tem dependência nenhuma** — nem `numpy`, nem `scipy`, nem `pandas`. Bootstrap e delta de Cliff são ~80 linhas de `statistics` e `random` da biblioteca padrão. Num repositório cujo argumento é rigor de medição, cálculo auditável linha a linha vale mais que a conveniência de importar.
+O núcleo **não tem dependência nenhuma** — nem `numpy`, nem `scipy`, nem `pandas`. Bootstrap, delta de Cliff e a distribuição `t` (via beta incompleta) são `statistics`, `math` e `random` da biblioteca padrão. Num repositório cujo argumento é rigor de medição, cálculo auditável linha a linha vale mais que a conveniência de importar — e os valores críticos da `t` são conferidos contra tabela publicada no teste.
 
 ---
 
@@ -56,14 +56,15 @@ src/harness_eng/
 │   ├── context.py   crescimento, concentração, cache
 │   └── cost.py      custo por modelo, por sessão, por chamada
 ├── stats/           o diferencial
-│   ├── compare.py   pareado, bootstrap, Cliff's delta, dominância
-│   └── design.py    poder por simulação, tamanho de amostra
+│   ├── compare.py    pareado, escolha de método, efeito, dominância
+│   ├── parametric.py teste t + distribuição t sem scipy, assimetria robusta
+│   └── design.py     poder por simulação, tamanho de amostra
 └── cli.py
 ```
 
 `trace/model.py`, `metrics/` e `stats/` são **puros**: recebem dado, devolvem número. Não conhecem provedor, não tocam disco, não abrem rede. `tests/test_layering.py` verifica isso e quebra o build quando a seta inverte.
 
-Consequência prática: **76 testes rodam em 6 segundos** sem transcript, sem chave de API e sem instalar nada além do `pytest`.
+Consequência prática: **88 testes rodam em 10 segundos** sem transcript, sem chave de API e sem instalar nada além do `pytest`.
 
 ---
 
