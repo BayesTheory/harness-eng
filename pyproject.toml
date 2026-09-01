@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-eng"
+version = "0.1.0"
+description = "Ferramentas para medir harnesses de agente: formato de trace agnostico, metricas de ferramenta/loop/contexto/custo, e comparacao estatistica pareada."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Rian Ferreira" }]
+keywords = ["llm", "agents", "harness", "observability", "evaluation", "statistics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+# O nucleo nao tem dependencia nenhuma. E deliberado: bootstrap e delta de Cliff sao
+# ~80 linhas de statistics e random da biblioteca padrao, e num repositorio cujo
+# argumento e rigor de medicao o calculo auditavel linha a linha vale mais que a
+# conveniencia de importar scipy.
+dependencies = []
+
+[project.optional-dependencies]
+# So o harness minimo precisa de rede. As ferramentas de analise, nao.
+harness = ["anthropic>=0.40", "openai>=1.40", "python-dotenv>=1.0"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.9"]
+
+[project.scripts]
+harness-eng = "harness_eng.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/BayesTheory/harness-eng"
+Issues = "https://github.com/BayesTheory/harness-eng/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+packages = ["harness_eng"]
+mypy_path = "src"
+ignore_missing_imports = true
+
+# trace/ e metrics/ e stats/ sao puros: da para exigir tipagem estrita neles.
+[[tool.mypy.overrides]]
+module = ["harness_eng.trace.model", "harness_eng.metrics.*", "harness_eng.stats.*"]
+disallow_untyped_defs = true
