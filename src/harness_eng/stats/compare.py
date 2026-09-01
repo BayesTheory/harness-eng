@@ -12,10 +12,24 @@ centavos, uma difícil custa dólares. Comparar a média de 20 execuções do ha
 20 do harness B mede principalmente quais tarefas caíram em qual grupo. Pareando (mesma
 tarefa nos dois), essa variância cancela e sobra o efeito do harness.
 
-**2. Bootstrap em vez de teste t.** As distribuições aqui são fortemente assimétricas e
-com cauda pesada: custo por sessão, tokens de contexto, contagem de retry. O teste t supõe
-normalidade e, nessas distribuições, produz intervalo confiante e errado. O bootstrap não
-supõe forma nenhuma — reamostra o que se observou.
+**2. Teste t para o veredito, bootstrap para a mediana.** Esta era a decisão errada na
+primeira versão, e a medição corrigiu.
+
+O argumento original — "as distribuições são assimétricas, logo o teste t mente" — tem
+premissa certa (assimetria do baseline real: +1,66) e conclusão errada. O teste t pareado
+não supõe que os DADOS sejam normais; supõe que as DIFERENÇAS sejam aproximadamente
+simétricas, e o pareamento é exatamente o que produz isso: a assimetria das diferenças do
+mesmo baseline é −0,13.
+
+Calibração medida (3.000 repetições sob a nula, nominal 5%): o teste t dá 2,7% / 3,1% /
+5,2% em n=12 / 20 / 40; o bootstrap percentil da mediana dá 6,8% / 6,4% / 6,1%. O
+bootstrap é liberal em toda a faixa — e BCa não corrige (7,5% em n=12, medido). Parte do
+"poder maior" dele era só rejeitar mais, inclusive quando não devia.
+
+Então o veredito usa o teste t quando as diferenças são simétricas, e cai para o bootstrap
+quando não são. O intervalo do bootstrap continua sendo reportado: ele é sobre a MEDIANA,
+que responde outra pergunta ("a tarefa típica melhorou?") e não é dominado por uma sessão
+cara. Ver ``parametric.py`` para os números completos.
 
 **3. Cliff's delta em vez de Cohen's d.** O ``d`` é razão de diferença de médias sobre
 desvio padrão; num dado assimétrico o desvio padrão não descreve a dispersão e o ``d``
@@ -34,6 +48,8 @@ import statistics
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Sequence
+
+from .parametric import TTestResult, difference_skewness, paired_t_test
 
 #: Limiares de magnitude do delta de Cliff (Romano et al., 2006). São convenção de campo,
 #: não lei da natureza — servem para rotular, e o número em si é que deve ser reportado.
@@ -118,10 +134,45 @@ class Comparison:
     dominance: float = 0.5
     lower_is_better: bool = True
     is_paired: bool = True
+    t_test: TTestResult | None = None
+    skewness: float | None = None
 
     @property
     def effect_size(self) -> EffectSize:
         return EffectSize.of(self.cliffs_delta)
+
+    @property
+    def differences_are_symmetric(self) -> bool:
+        """
+        Se o pareamento simetrizou as diferenças o bastante para o teste t valer.
+
+        Assimetria ROBUSTA (por quartis) abaixo de 0,3. Robusta porque o momento de
+        terceira ordem explode com um único outlier — num dado simétrico por construção
+        ele chegou a −10,76, e o portão seria acionado por ruído amostral.
+
+        ``None`` (quartis colapsados, amostra minúscula) conta como NÃO verificado, e
+        portanto não autoriza o teste t. Não conseguir checar a suposição é motivo para o
+        método mais robusto, nunca para o mais frágil.
+        """
+        return self.skewness is not None and abs(self.skewness) < 0.3
+
+    @property
+    def uses_parametric_verdict(self) -> bool:
+        """O veredito veio do teste t (melhor calibrado) ou do bootstrap (recuo)."""
+        return self.t_test is not None and self.differences_are_symmetric
+
+    @property
+    def direction_is_supported(self) -> bool:
+        """
+        Se há evidência de direção, pelo método mais bem calibrado disponível.
+
+        Teste t quando as diferenças são simétricas — medido: 5,2% de falso positivo em
+        n=40 contra 6,1% do bootstrap. Bootstrap quando não são, porque aí a suposição do
+        t deixou de valer e um teste mal especificado é pior que um liberal.
+        """
+        if self.uses_parametric_verdict:
+            return self.t_test.excludes_zero
+        return self.interval.excludes_zero
 
     @property
     def relative_change(self) -> float | None:
@@ -146,7 +197,7 @@ class Comparison:
         exclui zero, e a conclusão vira "estatisticamente significativo, praticamente
         irrelevante".
         """
-        if not self.interval.excludes_zero:
+        if not self.direction_is_supported:
             return None
         # Em desenho pareado o critério de relevância é a dominância, não o delta: o
         # delta subestima sistematicamente quando a variância entre tarefas é grande,
@@ -163,8 +214,11 @@ class Comparison:
     def summary(self) -> str:
         """Uma frase que um humano lê e entende sem saber estatística."""
         if self.winner is None:
-            if not self.interval.excludes_zero:
-                reason = "o intervalo inclui zero"
+            if not self.direction_is_supported:
+                reason = (
+                    f"p={self.t_test.p_value:.3f}" if self.uses_parametric_verdict
+                    else "o intervalo do bootstrap inclui zero"
+                )
             elif self.is_paired:
                 reason = f"B vence em apenas {self.dominance:.0%} das tarefas"
             else:
@@ -178,11 +232,14 @@ class Comparison:
         consistency = (
             f"vence em {self.dominance:.0%} das tarefas, " if self.is_paired else ""
         )
+        evidence = (
+            f"p={self.t_test.p_value:.4f}" if self.uses_parametric_verdict
+            else f"IC95% [{self.interval.low:.3g}, {self.interval.high:.3g}]"
+        )
         return (
             f"{self.metric}: {self.winner} vence ({consistency}"
-            f"δ={self.cliffs_delta:+.2f} {self.effect_size.value}, IC95% "
-            f"[{self.interval.low:.3g}, {self.interval.high:.3g}]{change_text}, "
-            f"n={self.n_pairs})"
+            f"δ={self.cliffs_delta:+.2f} {self.effect_size.value}, {evidence}"
+            f"{change_text}, n={self.n_pairs})"
         )
 
     def as_dict(self) -> dict:
@@ -202,6 +259,11 @@ class Comparison:
             "effect_size": self.effect_size.value,
             "paired_dominance": round(self.dominance, 4),
             "is_paired": self.is_paired,
+            "difference_skewness": (
+                round(self.skewness, 3) if self.skewness is not None else None
+            ),
+            "verdict_method": "t-test" if self.uses_parametric_verdict else "bootstrap",
+            "t_test": self.t_test.as_dict() if self.t_test else None,
             "winner": self.winner,
             "summary": self.summary(),
         }
@@ -362,6 +424,8 @@ def compare_paired(
         dominance=paired_dominance(differences, lower_is_better),
         lower_is_better=lower_is_better,
         is_paired=True,
+        t_test=paired_t_test(differences, confidence),
+        skewness=difference_skewness(differences),
     )
 
 

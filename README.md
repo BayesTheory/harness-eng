@@ -67,17 +67,35 @@ Consequência prática: **76 testes rodam em 6 segundos** sem transcript, sem ch
 
 ---
 
-## As três decisões estatísticas
-
-Cada uma tem uma razão que o dado exige, não uma preferência.
+## As decisões estatísticas, e a que eu errei
 
 **1. Pareamento por tarefa.** A variância entre tarefas é enorme — no baseline real, mediana US$ 67 e máximo US$ 548. Comparar a média de 20 execuções de A contra 20 de B mede principalmente quais tarefas caíram em qual grupo.
 
-**2. Bootstrap, não teste `t`.** O baseline real tem **média/mediana = 1,63**. Acima de ~1,2 a distribuição é assimétrica o bastante para o `t` produzir intervalo confiante e errado. O bootstrap não supõe forma nenhuma.
+**2. O veredito usa teste `t`. Esta era a decisão errada na primeira versão.**
 
-**3. Duas medidas de efeito, não uma.** Delta de Cliff descreve sobreposição das distribuições. **Dominância pareada** descreve consistência. Os dois saem juntos porque medem coisas diferentes — e porque este módulo errou isso antes de ser medido:
+A justificativa original foi: *"as distribuições deste domínio são assimétricas, logo o teste `t` mente"*. Premissa certa — o baseline real tem assimetria **+1,66**. Conclusão errada.
 
-> Num teste em que **toda** tarefa ficou 25-45% mais barata, o delta de Cliff saiu +0,32 — "pequeno". Não por bug: o delta compara todas as observações contra todas e ignora o pareamento, então com variância grande entre tarefas a tarefa cara melhorada ainda custa mais que a tarefa barata original. A dominância pareada, no mesmo teste: **1,00**.
+O teste `t` **pareado** não supõe que os dados sejam normais. Supõe que as *diferenças* sejam aproximadamente simétricas. E o pareamento é exatamente o que produz isso: a assimetria das diferenças do mesmo baseline é **−0,13**.
+
+Calibração medida, 3.000 repetições sob a hipótese nula (nominal 5%, ±0,8%):
+
+| n | teste `t` | bootstrap percentil |
+|---|---|---|
+| 12 | 2,7% (conservador) | **6,8%** (liberal) |
+| 20 | 3,1% | **6,4%** |
+| 40 | **5,2%** ✓ | 6,1% |
+
+O bootstrap da mediana é liberal em toda a faixa testada — e **BCa não corrige** (7,5% em n=12, medido). A mediana é uma estatística não-suave e a teoria de bootstrap para ela é fraca em amostra pequena.
+
+Consequência desconfortável: parte do "poder maior" que o bootstrap exibia era só ele rejeitar mais vezes, inclusive quando não devia.
+
+O bootstrap continua no pacote, para o que ele faz bem: intervalo em torno da **mediana** — que responde outra pergunta ("a tarefa típica melhorou?") e não é dominado por uma sessão cara — e estatísticas sem teoria paramétrica pronta.
+
+**3. O portão que escolhe o método também precisou de conserto.** A verificação de simetria usava o momento de terceira ordem. Num dado de diferenças **simétrico por construção** sobre cauda pesada, ele devolveu **−10,76**: um único outlier elevado ao cubo domina o estimador. Trocado por assimetria robusta de quartis (Bowley), que dá −0,12 no mesmo dado. Quartis colapsados devolvem `None` — *não consegui verificar* — e isso encaminha ao método mais robusto, nunca ao mais frágil.
+
+**4. Duas medidas de efeito.** Delta de Cliff descreve sobreposição das distribuições; **dominância pareada** descreve consistência. Os dois saem juntos porque medem coisas diferentes — e porque este módulo errou isso também:
+
+> Num teste em que **toda** tarefa ficou 25-45% mais barata, o delta de Cliff saiu +0,32 — "pequeno". Não por bug: o delta compara todas as observações contra todas e ignora o pareamento, então a tarefa cara melhorada ainda custa mais que a tarefa barata original. A dominância pareada, no mesmo teste: **1,00**.
 
 ### Quantas execuções você precisa
 
@@ -104,6 +122,8 @@ O repositório aplica em si o que cobra dos outros.
 **Modelo sem preço vira lacuna, não estimativa.** `CostReport.is_complete` diz quando o total é piso. Inventar um preço "próximo" produz um número que parece exato e está errado — exatamente o padrão que este repositório existe para detectar.
 
 **O adapter conta o que descarta.** `ClaudeCodeSource.skipped` registra cada registro ignorado e por quê. Um adapter que joga fora 30% das linhas está errado, e sem esse contador ninguém descobre.
+
+**Três erros do próprio pacote de estatística, todos achados medindo.** A escolha do bootstrap sobre o teste `t` estava mal justificada; o delta de Cliff estava errado como critério para desenho pareado; e o diagnóstico de simetria explodia com um outlier. Nenhum apareceu por revisão de código — os três apareceram quando a simulação contradisse o que o README afirmava. Está tudo na seção acima e no histórico de commits, porque um repositório que prega medição e esconde os próprios erros de medição não vale nada.
 
 ---
 

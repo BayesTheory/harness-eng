@@ -22,6 +22,7 @@ from harness_eng.stats.compare import (
     paired_dominance,
 )
 from harness_eng.stats.design import describe_baseline, estimate_power, required_pairs
+from harness_eng.stats.parametric import classical_skewness, difference_skewness, paired_t_test
 
 
 def naive_cliffs_delta(a, b):
@@ -239,3 +240,145 @@ class TestDesign:
     def test_empty_baseline_is_an_error(self):
         with pytest.raises(ValueError):
             estimate_power([], 0.2, n_pairs=10)
+
+
+class TestParametric:
+    """
+    O teste t, e a razão medida de ele existir aqui.
+
+    A primeira versão deste pacote não tinha teste t, com a justificativa de que as
+    distribuições do domínio são assimétricas. A premissa estava certa e a conclusão
+    errada: o t pareado supõe simetria das DIFERENÇAS, e o pareamento produz isso.
+    """
+
+    def test_critical_values_match_published_tables(self):
+        """
+        Implementação própria da distribuição t exige verificação independente.
+
+        Valores críticos bilaterais de 95%, tabelados. Uma CDF sutilmente errada produz
+        p-valores plausíveis e conclusões erradas — o pior modo de falha possível num
+        pacote de estatística.
+        """
+        from harness_eng.stats.parametric import _t_critical
+
+        published = {1: 12.706, 2: 4.303, 5: 2.571, 10: 2.228, 20: 2.086, 30: 2.042, 120: 1.980}
+        for df, expected in published.items():
+            assert _t_critical(df, 0.95) == pytest.approx(expected, abs=0.002)
+
+    def test_known_p_values(self):
+        from harness_eng.stats.parametric import _t_two_sided_p
+
+        assert _t_two_sided_p(2.228, 10) == pytest.approx(0.05, abs=0.001)
+        assert _t_two_sided_p(0.0, 10) == pytest.approx(1.0)
+        assert _t_two_sided_p(4.303, 2) == pytest.approx(0.05, abs=0.001)
+
+    def test_undefined_cases_return_none_not_a_p_value(self):
+        """"Não dá para testar" e "testei e não achei nada" são conclusões diferentes."""
+        assert paired_t_test([1.0]) is None
+        assert paired_t_test([2.0, 2.0, 2.0]) is None
+
+    def test_pairing_symmetrises_a_skewed_baseline(self):
+        """
+        A medição que corrigiu o desenho do pacote.
+
+        O baseline é fortemente assimétrico; as diferenças pareadas, não. É por isso que o
+        teste t é aplicável a um dado que "parece" violar sua suposição — e por que a
+        justificativa original do bootstrap estava errada.
+        """
+        rng = random.Random(1)
+        baseline = [rng.lognormvariate(1, 1.0) for _ in range(400)]
+        differences = [v * rng.uniform(0.85, 1.15) - v for v in baseline]
+
+        assert classical_skewness(baseline) > 1.0, "o baseline precisa ser assimétrico"
+        assert abs(difference_skewness(baseline)) > 0.15, "e assimétrico pela medida robusta"
+        assert abs(difference_skewness(differences)) < 0.2, "o pareamento deve simetrizar"
+
+    def test_robust_skewness_survives_a_single_outlier(self):
+        """
+        Por que a medida robusta, e não o momento de terceira ordem.
+
+        Estas diferenças são simétricas por construção (valor × ruído uniforme simétrico)
+        sobre um baseline de cauda pesada. A assimetria clássica devolve um número enorme
+        porque eleva os desvios ao cubo e um outlier domina tudo; a robusta devolve ~0,
+        que é a verdade. Usar a clássica como portão faria o método ser escolhido por
+        ruído amostral.
+        """
+        rng = random.Random(1)
+        baseline = [rng.lognormvariate(1, 1.0) for _ in range(400)]
+        differences = [v * rng.uniform(0.85, 1.15) - v for v in baseline]
+
+        assert abs(classical_skewness(differences)) > 3.0
+        assert abs(difference_skewness(differences)) < 0.2
+
+    def test_collapsed_quartiles_are_undefined_not_symmetric(self):
+        """
+        Buraco real: 27 de 30 valores iguais colapsam os quartis.
+
+        A medida devolvia 0,0 — "simétrico" — para um dado dominado por três outliers, e
+        o portão autorizaria o teste t. ``None`` significa "não dá para verificar", e não
+        verificar não é licença para usar o método mais frágil.
+        """
+        assert difference_skewness([-400.0] * 3 + [-1.0] * 27) is None
+
+    def test_t_test_is_better_calibrated_than_the_bootstrap_here(self):
+        """
+        Taxa de falso positivo sob a hipótese nula, no regime deste domínio.
+
+        Medido: o bootstrap percentil da mediana é liberal (rejeita mais que os 5%
+        nominais) e o teste t não. É a evidência que move o veredito para o t — e que
+        contradiz o que a primeira versão deste pacote afirmava.
+        """
+        rng = random.Random(21)
+        baseline = [rng.lognormvariate(1, 1.0) for _ in range(60)]
+        t_rejections = bootstrap_rejections = 0
+        trials = 400
+
+        for i in range(trials):
+            local = random.Random(3000 + i)
+            sample = [baseline[local.randrange(len(baseline))] for _ in range(20)]
+            differences = [v * local.uniform(0.85, 1.15) - v for v in sample]
+            result = paired_t_test(differences)
+            if result is not None and result.excludes_zero:
+                t_rejections += 1
+            if paired_bootstrap(differences, resamples=250, seed=None).excludes_zero:
+                bootstrap_rejections += 1
+
+        t_rate = t_rejections / trials
+        bootstrap_rate = bootstrap_rejections / trials
+        assert t_rate <= 0.075, f"teste t liberal demais: {t_rate:.1%}"
+        assert bootstrap_rate >= t_rate, (
+            "o achado que motivou este módulo é que o bootstrap rejeita mais; "
+            f"aqui deu t={t_rate:.1%} e bootstrap={bootstrap_rate:.1%}"
+        )
+
+
+class TestVerdictMethodSelection:
+    def test_symmetric_differences_use_the_t_test(self):
+        rng = random.Random(4)
+        base = {f"t{i}": rng.uniform(90, 110) for i in range(25)}
+        better = {t: v - rng.uniform(4, 6) for t, v in base.items()}
+        result = compare_paired(base, better)
+        assert result.differences_are_symmetric
+        assert result.uses_parametric_verdict
+        assert result.as_dict()["verdict_method"] == "t-test"
+
+    def test_skewed_differences_fall_back_to_the_bootstrap(self):
+        """
+        Quando o pareamento NÃO simetriza, a suposição do t não vale e o bootstrap volta.
+
+        Um teste mal especificado é pior que um liberal: o liberal erra numa direção
+        conhecida e reportada; o mal especificado erra numa direção que ninguém sabe.
+        """
+        rng = random.Random(4)
+        base = {f"t{i}": 100.0 for i in range(30)}
+        # Poucas tarefas melhoram muitíssimo: diferenças fortemente assimétricas.
+        skewed = {t: (v - 400.0 if i < 3 else v - 1.0) for i, (t, v) in enumerate(base.items())}
+        result = compare_paired(base, skewed)
+        assert not result.differences_are_symmetric
+        assert not result.uses_parametric_verdict
+
+    def test_the_summary_names_the_evidence_it_used(self):
+        rng = random.Random(4)
+        base = {f"t{i}": rng.uniform(90, 110) for i in range(25)}
+        better = {t: v - rng.uniform(4, 6) for t, v in base.items()}
+        assert "p=" in compare_paired(base, better, label_b="novo").summary()
