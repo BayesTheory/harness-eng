@@ -1,0 +1,75 @@
+# CI do harness-eng.
+#
+# O que este arquivo protege, e por que ele importa mais aqui do que num projeto comum:
+# `tests/test_layering.py` carrega sete regras de arquitetura — a camada de medição não
+# pode importar provedor, não pode tocar disco, não pode depender do harness. Regra de
+# arquitetura que só roda quando alguém lembra de rodar não é regra; é intenção. Este
+# workflow é o que a torna executável no PR de terceiro.
+#
+# A suíte NÃO instala `[harness]` de propósito. Os SDKs `anthropic` e `openai` não são
+# necessários para nenhum dos 170 testes, e provar isso a cada push é justamente a
+# afirmação central de `docs/testes.md`: contribuir neste projeto não custa nada, não
+# precisa de chave de API e não toca a rede. Se um dia um teste passar a exigir o extra,
+# o CI quebra aqui — que é o lugar certo para essa conversa acontecer.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Push seguido cancela a execução anterior do mesmo branch: o resultado que interessa é
+  # o do último commit, e fila de CI obsoleta só atrasa o retorno para quem abriu o PR.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    strategy:
+      # `fail-fast: false` para uma falha só em 3.10 não esconder o resultado em 3.12.
+      # Saber que quebra apenas na versão mais antiga é metade do diagnóstico.
+      fail-fast: false
+      matrix:
+        # O piso é o `requires-python = ">=3.10"` do pyproject.toml. Se o piso subir lá,
+        # ele sobe aqui — as duas listas dizem a mesma coisa e divergir é como uma
+        # promessa de compatibilidade deixa de valer sem ninguém notar.
+        python: ["3.10", "3.11", "3.12"]
+
+    name: testes (py${{ matrix.python }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: instalar
+        # Só `[dev]` — ver a nota no topo do arquivo.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: provar que nenhum SDK de provedor está instalado
+        # A afirmação da documentação vira verificação. Sem isto, uma dependência de
+        # provedor poderia entrar pela porta dos fundos (um `import` no topo de um módulo
+        # que o teste importa) e a promessa "roda sem chave" morreria em silêncio.
+        run: |
+          python - <<'EOF'
+          import importlib.util
+          intrusos = [m for m in ("anthropic", "openai") if importlib.util.find_spec(m)]
+          assert not intrusos, f"SDK de provedor instalado no ambiente de teste: {intrusos}"
+          print("nenhum SDK de provedor instalado — como esperado")
+          EOF
+
+      - name: testes
+        run: python -m pytest -q
+
+      - name: lint
+        run: python -m ruff check .

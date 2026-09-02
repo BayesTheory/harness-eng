@@ -382,6 +382,18 @@ Os transcripts **nunca** entram no repositório — `.gitignore` cobre `*.jsonl`
 
 ---
 
+## Contribuindo
+
+O caminho é curto e **não custa nada**: nenhum dos 170 testes precisa de chave de API, de rede ou de transcript.
+
+```bash
+pip install -e ".[dev]" && pytest -q
+```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) tem o checklist de PR e os buracos abertos. [`docs/`](docs/index.md) tem o resto: [CLI ou API](docs/cli-vs-api.md) · [chamando o modelo](docs/chamando-o-modelo.md) · [adicionar ferramenta](docs/adicionar-ferramenta.md) · [adicionar adapter](docs/adicionar-adapter.md) · [arquitetura](docs/arquitetura.md) · [testes](docs/testes.md).
+
+---
+
 ## Estado
 
 | Fase | Estado |
