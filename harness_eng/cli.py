@@ -51,7 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="diretório de traces (padrão: ~/.claude/projects)")
     analyze.add_argument("--json", action="store_true", help="saída em JSON")
     analyze.add_argument("--redact", action="store_true",
-                         help="troca caminho e comando por hash estável")
+                         default=_env("HARNESS_REDACT", "false").lower() in {"1", "true", "yes"},
+                         help="troca caminho e comando por hash estável (HARNESS_REDACT)")
     analyze.add_argument("--min-calls", type=int, default=30,
                          help="mínimo de chamadas para uma taxa de erro contar como sinal")
 
@@ -136,7 +137,11 @@ def _load(root: Path | None) -> tuple[TraceSet, Counter]:
     Sem esse laço, ``analyze`` mediria os harnesses dos outros e não o próprio — o que
     seria uma piada num repositório que cobra medição de quem escreve harness.
     """
-    resolved = root or default_root()
+    # Precedência: argumento > HARNESS_TRACE_ROOT > ~/.claude/projects. O ``.env.example``
+    # promete a variável desde o primeiro commit e nada a lia — configuração documentada e
+    # não implementada é pior que ausente, porque quem confia nela não descobre que falhou.
+    configured = _env("HARNESS_TRACE_ROOT", "")
+    resolved = root or (Path(configured) if configured else default_root())
     if not resolved.exists():
         print(f"erro: diretório de traces não encontrado: {resolved}", file=sys.stderr)
         raise SystemExit(2)
