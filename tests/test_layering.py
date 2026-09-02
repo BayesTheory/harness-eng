@@ -143,3 +143,41 @@ def test_stats_do_not_import_trace() -> None:
         assert "trace" not in _imported_roots(path), (
             f"{path.relative_to(SRC)} importa a camada de trace"
         )
+
+
+def test_nothing_measurable_depends_on_the_harness() -> None:
+    """
+    ``core/`` é consumidor do formato canônico, nunca dependência dele.
+
+    A seta aponta num sentido só: o harness importa ``trace``, e ``trace``, ``metrics`` e
+    ``stats`` não sabem que ele existe. Inverter é tentador — o harness tem o
+    ``ToolSpec``, e uma métrica sobre descrição de ferramenta ficaria "natural" importando
+    dele. No dia em que isso acontecer, medir um harness de terceiro passa a arrastar o
+    loop, o cliente de modelo e o SDK junto, e a promessa de rodar a suíte sem chave de
+    API morre sem que nenhum teste reclame.
+    """
+    for relative in ("trace/model.py", "trace/ports.py", "trace/sources", "metrics", "stats"):
+        for path in _python_files(relative):
+            source = path.read_text(encoding="utf-8")
+            assert "harness_eng.core" not in source and "from ..core" not in source, (
+                f"{path.relative_to(SRC)} importa o harness. A camada de medição existe "
+                f"para medir harness de terceiro também — ela não pode depender do nosso."
+            )
+
+
+def test_the_harness_talks_to_one_provider_in_one_place() -> None:
+    """
+    Só ``core/clients.py`` pode importar SDK de provedor.
+
+    O loop recebe um ``ModelClient`` pronto; no dia em que ele importar ``anthropic``
+    direto, a porta vira decoração e o adapter da OpenAI passa a ser reescrita em vez de
+    acréscimo.
+    """
+    for path in _python_files("core"):
+        if path.name == "clients.py":
+            continue
+        offenders = _imported_roots(path) & FORBIDDEN
+        assert not offenders, (
+            f"core/{path.name} importa {sorted(offenders)}: o acesso a provedor mora em "
+            f"core/clients.py, atrás da porta ModelClient."
+        )
