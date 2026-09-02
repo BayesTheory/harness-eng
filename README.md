@@ -36,6 +36,9 @@ harness-eng analyze ./traces --json
 harness-eng analyze --redact           # troca caminho e comando por hash estável
 harness-eng power                      # quantas tarefas para detectar uma melhora
 harness-eng compare atual.json novo.json --metric "custo/sessão"
+
+harness-eng run "resuma este pacote" --workspace harness_eng     # o harness mínimo
+harness-eng run "..." --dry-run        # loop inteiro, sem chave e sem custo
 ```
 
 O núcleo **não tem dependência nenhuma** — nem `numpy`, nem `scipy`, nem `pandas`. Bootstrap, delta de Cliff e a distribuição `t` (via beta incompleta) são `statistics`, `math` e `random` da biblioteca padrão. Num repositório cujo argumento é rigor de medição, cálculo auditável linha a linha vale mais que a conveniência de importar — e os valores críticos da `t` são conferidos contra tabela publicada no teste.
@@ -45,11 +48,11 @@ O núcleo **não tem dependência nenhuma** — nem `numpy`, nem `scipy`, nem `p
 ## Arquitetura
 
 ```
-src/harness_eng/
+harness_eng/
 ├── trace/           formato canônico — o vocabulário comum entre harnesses
 │   ├── model.py     Session, Turn, ToolCall, ToolResult, Usage, TraceSet
 │   ├── ports.py     TraceSource, TraceSink
-│   └── sources/     claude_code (pronto) · openai · native
+│   └── sources/     claude_code (pronto) · native (pronto) · openai
 ├── metrics/         puras sobre o formato canônico
 │   ├── tools.py     erro, retry, falha silenciosa, chamada sem resposta
 │   ├── loops.py     repetição, retry cego, oscilação
@@ -59,12 +62,19 @@ src/harness_eng/
 │   ├── compare.py    pareado, escolha de método, efeito, dominância
 │   ├── parametric.py teste t + distribuição t sem scipy, assimetria robusta
 │   └── design.py     poder por simulação, tamanho de amostra
+├── core/            o harness mínimo — o que fecha o círculo
+│   ├── ports.py     ModelClient, ModelResponse, ToolSpec
+│   ├── loop.py      o loop e os cinco desfechos possíveis
+│   ├── tools.py     registro, execução e as ferramentas de leitura
+│   └── clients.py   Anthropic (import preguiçoso) · Scripted (sem rede)
 └── cli.py
 ```
 
 `trace/model.py`, `metrics/` e `stats/` são **puros**: recebem dado, devolvem número. Não conhecem provedor, não tocam disco, não abrem rede. `tests/test_layering.py` verifica isso e quebra o build quando a seta inverte.
 
-Consequência prática: **88 testes rodam em 10 segundos** sem transcript, sem chave de API e sem instalar nada além do `pytest`.
+A seta aponta num sentido só: `core/` importa `trace/`, e `trace/`, `metrics/` e `stats/` não sabem que ele existe. Inverter seria tentador — o harness tem o `ToolSpec`, e uma métrica sobre descrição de ferramenta ficaria "natural" importando dele. No dia em que isso acontecesse, medir um harness de terceiro passaria a arrastar o loop, o cliente de modelo e o SDK junto. Também é teste, e os dois foram verificados contra violação plantada — regra de arquitetura que nunca falhou não protege nada.
+
+Consequência prática: **114 testes rodam em 6 segundos** sem transcript, sem chave de API e sem instalar nada além do `pytest`.
 
 ---
 

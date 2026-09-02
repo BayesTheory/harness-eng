@@ -40,16 +40,19 @@ Homepage = "https://github.com/BayesTheory/harness-eng"
 Issues = "https://github.com/BayesTheory/harness-eng/issues"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+# Layout plano: o pacote fica na raiz. "harness-eng/src/harness_eng" repetia o nome
+# tres vezes no caminho sem comprar nada.
+where = ["."]
+include = ["harness_eng*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-src = ["src", "tests"]
+src = [".", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
@@ -57,7 +60,7 @@ select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
 [tool.mypy]
 python_version = "3.10"
 packages = ["harness_eng"]
-mypy_path = "src"
+mypy_path = "."
 ignore_missing_imports = true
 
 # trace/ e metrics/ e stats/ sao puros: da para exigir tipagem estrita neles.

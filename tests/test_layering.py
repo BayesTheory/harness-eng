@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "harness_eng"
+PACKAGE = Path(__file__).resolve().parents[1] / "harness_eng"
 
 #: Pacotes que a camada pura não pode importar. ``statistics`` e ``random`` são da
 #: biblioteca padrão e estão liberados: matemática não é infraestrutura.
@@ -33,7 +33,7 @@ PURE_MODULES = ["trace/model.py", "trace/ports.py", "metrics", "stats"]
 
 
 def _python_files(relative: str) -> list[Path]:
-    target = SRC / relative
+    target = PACKAGE / relative
     if target.is_file():
         return [target]
     return [p for p in target.rglob("*.py") if "__pycache__" not in p.parts]
@@ -58,7 +58,7 @@ ALL_PURE_FILES = [p for relative in PURE_MODULES for p in _python_files(relative
 def test_pure_layer_has_no_heavy_dependency(path: Path) -> None:
     offenders = _imported_roots(path) & FORBIDDEN
     assert not offenders, (
-        f"{path.relative_to(SRC)} importa {sorted(offenders)}. Esta camada recebe dado e "
+        f"{path.relative_to(PACKAGE)} importa {sorted(offenders)}. Esta camada recebe dado e "
         f"devolve número — mova o acesso ao mundo para trace/sources/ ou core/."
     )
 
@@ -74,7 +74,7 @@ def test_pure_layer_does_not_touch_the_filesystem(path: Path) -> None:
     source = path.read_text(encoding="utf-8")
     for marker in ("open(", ".read_text(", ".read_bytes(", "os.environ", "os.getenv"):
         assert marker not in source, (
-            f"{path.relative_to(SRC)} usa {marker!r}: acesso a disco/ambiente pertence "
+            f"{path.relative_to(PACKAGE)} usa {marker!r}: acesso a disco/ambiente pertence "
             f"aos adapters, não à camada de medição."
         )
 
@@ -114,7 +114,7 @@ def test_the_canonical_model_knows_no_specific_harness() -> None:
     É o vocabulário comum; no momento em que ele carrega um caso especial de um harness,
     deixa de ser comum e o segundo adapter passa a lutar contra ele.
     """
-    used = _code_identifiers_and_literals(SRC / "trace" / "model.py")
+    used = _code_identifiers_and_literals(PACKAGE / "trace" / "model.py")
     for name in ("claude_code", "tooluseresult", "cache_creation_input_tokens", "jsonl"):
         assert name not in used, (
             f"trace/model.py usa {name!r} no código — detalhe de origem vazou para o "
@@ -127,7 +127,7 @@ def test_metrics_do_not_import_sources() -> None:
     for path in _python_files("metrics"):
         source = path.read_text(encoding="utf-8")
         assert "trace.sources" not in source and "claude_code" not in source, (
-            f"{path.relative_to(SRC)} conhece um adapter concreto"
+            f"{path.relative_to(PACKAGE)} conhece um adapter concreto"
         )
 
 
@@ -141,7 +141,7 @@ def test_stats_do_not_import_trace() -> None:
     """
     for path in _python_files("stats"):
         assert "trace" not in _imported_roots(path), (
-            f"{path.relative_to(SRC)} importa a camada de trace"
+            f"{path.relative_to(PACKAGE)} importa a camada de trace"
         )
 
 
@@ -160,7 +160,7 @@ def test_nothing_measurable_depends_on_the_harness() -> None:
         for path in _python_files(relative):
             source = path.read_text(encoding="utf-8")
             assert "harness_eng.core" not in source and "from ..core" not in source, (
-                f"{path.relative_to(SRC)} importa o harness. A camada de medição existe "
+                f"{path.relative_to(PACKAGE)} importa o harness. A camada de medição existe "
                 f"para medir harness de terceiro também — ela não pode depender do nosso."
             )
 
