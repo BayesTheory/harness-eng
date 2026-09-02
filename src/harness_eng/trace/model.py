@@ -37,9 +37,17 @@ class StopReason(str, Enum):
     Importa para medição: ``TOOL_USE`` é o caso normal de um agente em loop,
     ``MAX_TOKENS`` é truncamento — resposta cortada no meio, quase sempre um sintoma de
     contexto mal administrado, e o tipo de coisa que se quer contar.
+
+    ``PAUSE_TURN`` é o caso que mais engana. O modelo não terminou: pausou um turno longo
+    e espera ser retomado com o que já produziu. Um harness que trata "não é ``TOOL_USE``"
+    como "acabou" encerra o loop no meio do trabalho, registra ``END_TURN`` no lugar e
+    entrega resultado parcial **sem erro nenhum** — falha silenciosa, que é a categoria que
+    este repositório existe para tornar contável. Faltava neste enum até o harness do
+    próprio pacote precisar dele.
     """
 
     TOOL_USE = "tool_use"
+    PAUSE_TURN = "pause_turn"
     END_TURN = "end_turn"
     MAX_TOKENS = "max_tokens"
     STOP_SEQUENCE = "stop_sequence"
