@@ -78,6 +78,36 @@ Consequência prática: **114 testes rodam em 6 segundos** sem transcript, sem c
 
 ---
 
+## O harness mínimo, e o que ele fecha
+
+Até aqui toda medição do pacote passava por um adapter. Adapter é tradução, e tradução deixa uma dúvida de pé: **quanto do número é o harness e quanto é a tradução?** O `core/` responde isso escrevendo `Session` canônica direto — o trace é o registro primário, não uma reconstrução dele. O harness deste repositório é medido pelas mesmas ferramentas que medem os outros, sem nada no meio.
+
+Um agente é, no fundo, um `while`. O que separa um harness de outro não é o `while` — é o que cada um faz nas bordas, e é lá que nascem os modos de falha que o resto do pacote mede:
+
+| Borda | O que acontece se errar |
+|---|---|
+| `pause_turn` não é fim de turno | O loop encerra no meio e devolve trabalho parcial **sem erro nenhum** |
+| Teto de iteração, e bater nele **não é sucesso** | Sem teto, um modelo que nunca emite `end_turn` roda até a conta acabar |
+| Resposta cortada por `max_tokens` não executa a ferramenta | O último bloco pode estar pela metade: é rodar argumento que o modelo não terminou de escrever |
+| Resultados paralelos voltam numa mensagem só | Parti-los é aceito pela API e ensina o modelo a parar de pedir chamadas em paralelo, sem rastro |
+
+As quatro têm teste, e nenhum precisa de chave de API — é para isso que existe o `ScriptedClient`. Um comportamento de borda que só aparece em produção é um comportamento que ninguém verifica.
+
+**Duas decisões que valem registro.**
+
+*A conversa **é** o trace.* A mesma tupla de `Turn` que vai para o modelo é a que sai no relatório. Um harness que mantém uma lista de mensagens para a API e um log separado para a análise tem dois estados que podem divergir — e quando divergem, é o log que mente, sempre no sentido de parecer melhor do que foi, porque ninguém escreve código de log que invente falha.
+
+*O formato canônico é lossy para replay, e está certo assim.* Um bloco de pensamento carrega assinatura do provedor; reconstruí-lo a partir do texto canônico entrega um bloco sem assinatura, que a API descarta. Medição quer o que dá para comparar entre provedores; replay quer fidelidade de byte com um provedor específico. Forçar um tipo a servir aos dois estraga os dois — daí `replay_content`, opaco para o loop e **ausente do trace gravado**: um trace é registro de medição, não checkpoint retomável.
+
+```bash
+harness-eng run "..." --dry-run     # loop, executor, trace e métricas, sem gastar nada
+harness-eng analyze reports/native  # e aí a medição roda sobre o próprio harness
+```
+
+O código de saída é `0` só quando o modelo terminou por vontade própria. Teto de iteração, truncamento e erro de provedor devolvem `1`: num script de CI as três coisas são "não terminou", e um harness que devolve zero ao ser desligado no meio mente para a automação que o chama.
+
+---
+
 ## As decisões estatísticas, e a que eu errei
 
 **1. Pareamento por tarefa.** A variância entre tarefas é enorme — no baseline real, mediana US$ 67 e máximo US$ 548. Comparar a média de 20 execuções de A contra 20 de B mede principalmente quais tarefas caíram em qual grupo.
@@ -134,6 +164,10 @@ O repositório aplica em si o que cobra dos outros.
 
 **O adapter conta o que descarta.** `ClaudeCodeSource.skipped` registra cada registro ignorado e por quê. Um adapter que joga fora 30% das linhas está errado, e sem esse contador ninguém descobre.
 
+**O formato canônico tinha um buraco, e escrever o harness foi o que revelou.** `pause_turn` é um motivo de parada real — o modelo pausou um turno longo e espera ser retomado — e não existia no `StopReason`. `parse` o mapeava para `UNKNOWN`, então um harness que tratasse "não é `tool_use`" como "acabou" encerraria no meio e registraria fim normal: exatamente a falha silenciosa que este repositório existe para tornar contável, incontável pela própria ferramenta. Não apareceu em revisão de código nem nos 54 transcripts — apareceu quando um consumidor novo precisou do caso. É o argumento a favor do segundo adapter: um formato só prova ser comum quando alguém que não o escreveu tenta usá-lo.
+
+**O round-trip é teste, não confiança.** `Session → disco → Session` compara campo a campo. Se um campo se perde no caminho, o formato tem outro buraco — e é melhor descobrir com um teste de 40 linhas do que com um relatório que reporta zero onde havia dado.
+
 **Três erros do próprio pacote de estatística, todos achados medindo.** A escolha do bootstrap sobre o teste `t` estava mal justificada; o delta de Cliff estava errado como critério para desenho pareado; e o diagnóstico de simetria explodia com um outlier. Nenhum apareceu por revisão de código — os três apareceram quando a simulação contradisse o que o README afirmava. Está tudo na seção acima e no histórico de commits, porque um repositório que prega medição e esconde os próprios erros de medição não vale nada.
 
 ---
@@ -153,8 +187,8 @@ Os transcripts **nunca** entram no repositório — `.gitignore` cobre `*.jsonl`
 | Formato canônico + adapter Claude Code | pronto, validado em 54 transcripts |
 | Métricas (ferramenta, loop, contexto, custo) | pronto |
 | Estatística (pareado, bootstrap, poder) | pronto, validado contra implementação de referência |
-| CLI (`analyze`, `compare`, `power`) | pronto |
-| Harness mínimo (`core/`) | próximo |
-| Adapter OpenAI | depois do harness — a estrutura agnóstica precisa provar que aguenta o segundo formato |
+| CLI (`analyze`, `compare`, `power`, `run`) | pronto |
+| Harness mínimo (`core/`) + trace nativo | pronto, com round-trip verificado |
+| Adapter OpenAI | próximo — a estrutura agnóstica precisa provar que aguenta o segundo formato |
 
 MIT.
