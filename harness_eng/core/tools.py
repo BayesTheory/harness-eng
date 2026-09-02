@@ -14,11 +14,16 @@ do repositório, e a superfície de risco junto.
 from __future__ import annotations
 
 import fnmatch
+import inspect
+import json
+import re
 import time
+import types
+import typing
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence, get_args, get_origin
 
 from ..trace.model import ToolCall, ToolResult
 from .ports import ToolSpec
@@ -70,9 +75,23 @@ class ToolRegistry:
         self._tools: dict[str, RegisteredTool] = {}
 
     def register(self, spec: ToolSpec, handler: Handler) -> "ToolRegistry":
+        """Registro explícito: você traz o schema. Prefira :meth:`add` quando for função."""
         if spec.name in self._tools:
             raise ValueError(f"ferramenta duplicada: {spec.name}")
         self._tools[spec.name] = RegisteredTool(spec=spec, handler=handler)
+        return self
+
+    def add(self, *functions: Callable[..., Any]) -> "ToolRegistry":
+        """
+        Registra funções direto, derivando o schema da assinatura.
+
+        Aceita função decorada com :func:`tool` e função crua — na crua, deriva na hora.
+        Existe para o caminho comum ser uma linha: ``registry.add(soma, subtrai)``.
+        """
+        for fn in functions:
+            spec = getattr(fn, "spec", None) or describe(fn)
+            handler = getattr(fn, "handler", None) or as_handler(fn)
+            self.register(spec, handler)
         return self
 
     def __contains__(self, name: object) -> bool:
@@ -135,6 +154,236 @@ class ToolRegistry:
             content_kinds=("text",),
             duration=timedelta(seconds=time.perf_counter() - started),
         )
+
+
+# ── @tool: a assinatura vira o schema ────────────────────────────────────────────────
+
+#: As duas formas de escrever união. ``Optional[X]`` produz ``typing.Union``; ``X | None``
+#: produz ``types.UnionType``, que é outra classe — as duas precisam ser reconhecidas.
+_UNION_ORIGINS = {typing.Union, types.UnionType}
+
+#: Tipos Python que viram tipo JSON Schema direto.
+_JSON_TYPES: dict[Any, str] = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+}
+
+
+def _json_type(annotation: Any, parameter: str, function: str) -> dict:
+    """
+    Traduz uma anotação Python para um pedaço de JSON Schema.
+
+    Sem anotação, não há schema — e por isso o erro é levantado na **decoração**, não na
+    execução. Um schema adivinhado passa no teste, chega ao modelo com o tipo errado e
+    reaparece como "o modelo passou string onde eu queria número", que é caro de
+    diagnosticar e barato de prevenir aqui.
+    """
+    if annotation is inspect.Parameter.empty:
+        raise ValueError(
+            f"{function}(): o parâmetro '{parameter}' não tem anotação de tipo. "
+            f"O modelo lê o schema para saber o que mandar — anote (ex.: {parameter}: str)."
+        )
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    # Optional[X] / X | None: o tipo é o de X, e a ausência vira "não obrigatório".
+    #
+    # As duas sintaxes precisam ser checadas. ``Optional[float]`` tem origem
+    # ``typing.Union``; ``float | None`` tem origem ``types.UnionType``, que é uma classe
+    # diferente — e a primeira versão disto comparava o *texto* da origem, então a forma
+    # moderna, que é a que as pessoas escrevem hoje, caía direto no erro de "tipo sem
+    # tradução". Achado pelo teste que cobria as duas.
+    if origin in _UNION_ORIGINS:
+        real = [a for a in args if a is not type(None)]
+        if len(real) == 1:
+            return _json_type(real[0], parameter, function)
+        raise ValueError(
+            f"{function}(): união de vários tipos em '{parameter}' não vira schema claro. "
+            f"Escolha um tipo, ou receba str e converta dentro da função."
+        )
+
+    if annotation in _JSON_TYPES:
+        return {"type": _JSON_TYPES[annotation]}
+
+    if origin in (list, tuple) or annotation in (list, tuple):
+        items = _json_type(args[0], parameter, function) if args else {"type": "string"}
+        return {"type": "array", "items": items}
+
+    if origin is dict or annotation is dict:
+        return {"type": "object"}
+
+    raise ValueError(
+        f"{function}(): não sei virar schema o tipo {annotation!r} de '{parameter}'. "
+        f"Tipos suportados: str, int, float, bool, list[...], dict e Optional deles."
+    )
+
+
+def _split_docstring(doc: str | None) -> tuple[str, dict[str, str]]:
+    """
+    Separa a descrição da ferramenta das descrições de parâmetro.
+
+    Aceita as duas convenções que as pessoas de fato escrevem — ``Args:``/``Params:`` do
+    Google e ``:param x:`` do reST. Não é firula: a descrição do parâmetro é o que o
+    modelo lê para decidir o que mandar, e obrigar um formato só faria a maioria dos
+    docstrings existentes não render nada.
+    """
+    if not doc:
+        return "", {}
+
+    lines = inspect.cleandoc(doc).splitlines()
+    description: list[str] = []
+    params: dict[str, str] = {}
+    in_args = False
+
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^(Args|Arguments|Params|Parameters|Argumentos|Parâmetros)\s*:$", stripped):
+            in_args = True
+            continue
+        rest = re.match(r"^:param\s+(\w+)\s*:\s*(.+)$", stripped)
+        if rest:
+            params[rest.group(1)] = rest.group(2).strip()
+            continue
+        if in_args:
+            entry = re.match(r"^(\w+)\s*(?:\([^)]*\))?\s*:\s*(.+)$", stripped)
+            if entry:
+                params[entry.group(1)] = entry.group(2).strip()
+                continue
+            if not stripped:
+                continue
+            in_args = False
+        if not stripped.startswith(":"):
+            description.append(line)
+
+    return "\n".join(description).strip(), params
+
+
+def describe(fn: Callable[..., Any], *, name: str | None = None,
+             description: str | None = None) -> ToolSpec:
+    """
+    Deriva o :class:`ToolSpec` de uma função: nome, descrição e schema.
+
+    Esta é a peça que tira o JSON Schema escrito à mão do caminho. Escrever schema à mão
+    não é só chato — é uma segunda fonte de verdade que sai de sincronia com a função na
+    primeira vez que alguém renomeia um parâmetro, e o sintoma é o modelo mandando um
+    argumento que a função não aceita.
+    """
+    signature = inspect.signature(fn)
+    try:
+        hints = typing.get_type_hints(fn)
+    except NameError as exc:
+        # Com ``from __future__ import annotations`` as anotações são strings, e resolvê-las
+        # exige que o nome exista no módulo. Tipo declarado dentro de outra função, ou
+        # importado só sob ``TYPE_CHECKING``, estoura um ``NameError`` cru que não diz o
+        # que fazer. A mensagem abaixo diz.
+        raise ValueError(
+            f"{fn.__name__}(): não consegui resolver uma anotação de tipo ({exc}). "
+            f"Tipo definido dentro de função, ou importado só sob TYPE_CHECKING, não é "
+            f"visível aqui — use um tipo de módulo, ou receba str e converta na função."
+        ) from exc
+    doc, param_docs = _split_docstring(fn.__doc__)
+
+    properties: dict[str, dict] = {}
+    required: list[str] = []
+    for parameter in signature.parameters.values():
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            raise ValueError(
+                f"{fn.__name__}(): *args/**kwargs não viram schema. "
+                f"Declare os parâmetros que o modelo pode mandar."
+            )
+        annotation = hints.get(parameter.name, parameter.annotation)
+        schema = _json_type(annotation, parameter.name, fn.__name__)
+        if parameter.name in param_docs:
+            schema["description"] = param_docs[parameter.name]
+        properties[parameter.name] = schema
+        if parameter.default is inspect.Parameter.empty:
+            required.append(parameter.name)
+
+    return ToolSpec(
+        name=name or fn.__name__,
+        description=description or doc or fn.__name__,
+        input_schema={
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        },
+    )
+
+
+def _coerce(value: Any) -> str:
+    """
+    O retorno da função vira o texto que o modelo lê.
+
+    ``dict`` e ``list`` saem como JSON em vez de ``repr`` do Python: aspas simples e
+    ``None`` no lugar de ``null`` são coisas que o modelo lê pior, e é gratuito acertar.
+    ``None`` vira string vazia de propósito — e string vazia é contada como falha
+    silenciosa pelo executor, que é a leitura correta de uma ferramenta que não devolveu nada.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def as_handler(fn: Callable[..., Any]) -> Handler:
+    """
+    Embrulha a função para o executor: recebe o mapa de argumentos, chama com kwargs.
+
+    Argumento faltando ou sobrando vira :class:`ToolError` com mensagem legível em vez de
+    ``TypeError`` cru. A diferença importa porque essa mensagem vai **para o modelo**, e
+    "faltou o argumento 'a'" o faz corrigir na próxima chamada; um traceback, não.
+    """
+    signature = inspect.signature(fn)
+
+    def handler(arguments: Mapping[str, object]) -> str:
+        try:
+            bound = signature.bind(**arguments)
+        except TypeError as exc:
+            raise ToolError(f"argumentos inválidos para {fn.__name__}(): {exc}") from exc
+        bound.apply_defaults()
+        return _coerce(fn(*bound.args, **bound.kwargs))
+
+    return handler
+
+
+def tool(fn: Callable[..., Any] | None = None, *, name: str | None = None,
+         description: str | None = None) -> Any:
+    """
+    Decorador: transforma uma função Python numa ferramenta, sem schema à mão.
+
+    ::
+
+        @tool
+        def soma(a: int, b: int) -> int:
+            \"\"\"Soma dois números.
+
+            Args:
+                a: primeira parcela
+                b: segunda parcela
+            \"\"\"
+            return a + b
+
+    A função continua sendo uma função normal — dá para chamar, testar e importar como
+    sempre. O decorador só pendura ``.spec`` e ``.handler`` nela, que é o que o registro
+    consome. Nada de classe base, nada de registro global: uma ferramenta é uma função.
+    """
+
+    def decorate(target: Callable[..., Any]) -> Callable[..., Any]:
+        target.spec = describe(target, name=name, description=description)  # type: ignore[attr-defined]
+        target.handler = as_handler(target)  # type: ignore[attr-defined]
+        return target
+
+    return decorate(fn) if fn is not None else decorate
 
 
 # ── ferramentas embutidas ────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ borda só dá para observar gastando dinheiro é um harness que ninguém verific
 """
 from __future__ import annotations
 
+import json
 from collections import deque
 from typing import Any, Iterable, Sequence
 
@@ -263,6 +264,219 @@ def from_message(message: Any) -> ModelResponse:
         stop_reason=StopReason.parse(getattr(message, "stop_reason", None)),
         replay_content=getattr(message, "content", None),
         stop_details=stop_details,
+    )
+
+
+class OpenAIClient:
+    """
+    Fala o formato *chat completions*. Implementa :class:`~harness_eng.core.ports.ModelClient`.
+
+    Na prática isto é "qualquer IA": além da OpenAI, o mesmo formato é o que Ollama, vLLM,
+    Groq, Together, OpenRouter e a maioria dos servidores locais expõem. ``base_url``
+    aponta para qualquer um deles::
+
+        OpenAIClient(model="llama3", base_url="http://localhost:11434/v1", api_key="ollama")
+
+    Este adapter é o teste que o README prometia: a estrutura só é agnóstica se aguentar
+    um segundo formato sem que o loop, as métricas ou o trace mudem. Aguentou — e as três
+    diferenças reais que apareceram estão marcadas no código, porque são exatamente o tipo
+    de detalhe que um formato canônico existe para absorver:
+
+    1. resultado de ferramenta é **uma mensagem por resultado**, não uma com vários blocos;
+    2. os argumentos chegam como **string JSON**, não como dicionário;
+    3. ``prompt_tokens`` já **inclui** os tokens lidos de cache — somar os dois contaria em
+       dobro, e o tamanho de contexto medido sairia inflado.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        system: str | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        client: Any = None,
+    ) -> None:
+        self._model = model
+        self._system = system
+        self._max_tokens = max_tokens
+
+        if client is not None:
+            self._client = client
+            return
+        try:
+            import openai
+        except ImportError as exc:  # pragma: no cover - depende do ambiente
+            raise ModelError(
+                "o SDK da OpenAI não está instalado. "
+                'Instale o extra: pip install -e ".[harness]"'
+            ) from exc
+        options: dict[str, Any] = {}
+        if api_key:
+            options["api_key"] = api_key
+        if base_url:
+            options["base_url"] = base_url
+        self._client = openai.OpenAI(**options)
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def complete(self, conversation: Sequence[Turn], tools: Sequence[ToolSpec]) -> ModelResponse:
+        messages = to_openai_messages(conversation)
+        if self._system:
+            messages.insert(0, {"role": "system", "content": self._system})
+
+        request: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "max_completion_tokens": self._max_tokens,
+        }
+        if tools:
+            request["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": dict(spec.input_schema),
+                    },
+                }
+                for spec in tools
+            ]
+
+        try:
+            completion = self._client.chat.completions.create(**request)
+        except Exception as exc:  # noqa: BLE001 — traduzido logo abaixo
+            raise _translate(exc) from exc
+
+        return from_completion(completion)
+
+
+def to_openai_messages(conversation: Sequence[Turn]) -> list[dict[str, Any]]:
+    """
+    Conversa canônica → mensagens no formato *chat completions*.
+
+    Diferença número 1 do docstring da classe: um turno de user canônico que carrega três
+    resultados de ferramenta vira **três** mensagens ``role="tool"``. Não é perda — é a
+    mesma informação em outra forma, e o formato canônico guarda a forma que preserva o
+    agrupamento porque dá para derivar a outra a partir dela, não o contrário.
+    """
+    messages: list[dict[str, Any]] = []
+    for turn in conversation:
+        if turn.role is Role.ASSISTANT:
+            message: dict[str, Any] = {"role": "assistant", "content": turn.text or None}
+            if turn.tool_calls:
+                message["tool_calls"] = [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": json.dumps(dict(call.arguments), ensure_ascii=False),
+                        },
+                    }
+                    for call in turn.tool_calls
+                ]
+            if message["content"] is not None or "tool_calls" in message:
+                messages.append(message)
+            continue
+
+        if turn.tool_results:
+            messages.extend(
+                {
+                    "role": "tool",
+                    "tool_call_id": result.call_id,
+                    "content": result.content or "(sem saída)",
+                }
+                for result in turn.tool_results
+            )
+        elif turn.text:
+            messages.append({"role": "user", "content": turn.text})
+    return messages
+
+
+#: ``finish_reason`` do formato chat completions → motivo canônico de parada.
+_FINISH_REASONS = {
+    "stop": StopReason.END_TURN,
+    "length": StopReason.MAX_TOKENS,
+    "tool_calls": StopReason.TOOL_USE,
+    "function_call": StopReason.TOOL_USE,
+    "content_filter": StopReason.REFUSAL,
+}
+
+
+def from_completion(completion: Any) -> ModelResponse:
+    """
+    Resposta *chat completions* → vocabulário canônico.
+
+    Diferença número 2: ``function.arguments`` é uma **string JSON**. Repassá-la como está
+    faria ``ToolCall.arguments`` virar uma string onde o resto do pacote espera um mapa —
+    e o detector de loop, que assina a chamada pelos argumentos ordenados, deixaria de
+    casar repetições entre provedores.
+    """
+    choices = getattr(completion, "choices", None) or []
+    if not choices:
+        return ModelResponse(
+            stop_reason=StopReason.UNKNOWN, model=getattr(completion, "model", None)
+        )
+
+    choice = choices[0]
+    message = getattr(choice, "message", None)
+    calls: list[ToolCall] = []
+    for raw in (getattr(message, "tool_calls", None) or []):
+        function = getattr(raw, "function", None)
+        try:
+            arguments = json.loads(getattr(function, "arguments", "") or "{}")
+        except json.JSONDecodeError:
+            # Argumento inválido é do modelo, não do adapter. Vira chamada com mapa vazio
+            # e o executor devolve erro legível — melhor que estourar a sessão inteira.
+            arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        calls.append(
+            ToolCall(
+                id=getattr(raw, "id", ""),
+                name=getattr(function, "name", ""),
+                arguments=arguments,
+            )
+        )
+
+    return ModelResponse(
+        text=getattr(message, "content", None) or "",
+        thinking=getattr(message, "reasoning_content", None) or "",
+        tool_calls=tuple(calls),
+        usage=_openai_usage(getattr(completion, "usage", None)),
+        model=getattr(completion, "model", None),
+        stop_reason=_FINISH_REASONS.get(getattr(choice, "finish_reason", None), StopReason.UNKNOWN),
+        # Sem concessão de replay aqui: este formato não assina o bloco de raciocínio, então
+        # reconstruir a mensagem a partir do canônico é fiel. A concessão em
+        # ``ModelResponse.replay_content`` é específica de quem assina — ver ports.py.
+        replay_content=None,
+    )
+
+
+def _openai_usage(raw: Any) -> Usage | None:
+    """
+    Uso do formato chat completions → :class:`Usage` canônico.
+
+    Diferença número 3, e a que erra em silêncio: ``prompt_tokens`` **já inclui** os
+    tokens lidos de cache. Como ``Usage.context_size`` soma input + cache lido + cache
+    escrito, repassar ``prompt_tokens`` cru contaria o cache duas vezes e inflaria o
+    tamanho de contexto medido — num relatório cujo assunto é justamente crescimento de
+    contexto. Por isso o cache sai do input aqui.
+    """
+    if raw is None:
+        return None
+    prompt = getattr(raw, "prompt_tokens", 0) or 0
+    details = getattr(raw, "prompt_tokens_details", None)
+    cached = (getattr(details, "cached_tokens", 0) or 0) if details is not None else 0
+    return Usage(
+        input_tokens=max(prompt - cached, 0),
+        output_tokens=getattr(raw, "completion_tokens", 0) or 0,
+        cache_write_tokens=0,  # o formato não reporta escrita de cache separadamente
+        cache_read_tokens=cached,
     )
 
 

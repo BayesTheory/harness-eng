@@ -87,6 +87,20 @@ class RunOutcome:
     def tool_calls(self) -> int:
         return len(self.session.tool_calls())
 
+    @property
+    def final_text(self) -> str:
+        """
+        O texto do último turno de assistant — a resposta, para quem só quer a resposta.
+
+        Existe porque ``outcome.session.turns[-1].text`` é o que todo mundo escreveria, e
+        está errado quando o último turno é o de resultados de ferramenta. Errar isso
+        devolve string vazia e parece "o modelo não respondeu".
+        """
+        for turn in reversed(self.session.turns):
+            if turn.is_assistant and turn.text:
+                return turn.text
+        return ""
+
     def as_dict(self) -> dict:
         return {
             "status": self.status.value,
