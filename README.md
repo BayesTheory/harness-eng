@@ -162,6 +162,77 @@ Estas quatro estão implementadas e testadas — e as quatro são silenciosas, i
 
 ---
 
+## Níveis: quanto poder esse agente precisa?
+
+Um harness não é uma coisa só. É um conjunto de **capacidades concedidas** — ler arquivo, sair para a internet, rodar comando — e cada uma tem grau. "Rodei o agente" não descreve um experimento. "Rodei o agente no nível 2" descreve.
+
+```python
+h = Harness(model="claude-opus-5", level=2)      # lê arquivo + internet
+```
+
+| Nível | Nome | Arquivo | Rede | Comando | Ferramentas concedidas |
+|---|---|---|---|---|---|
+| **0** | `sealed` | — | — | — | nenhuma: só o modelo |
+| **1** | `reader` | lê | — | — | `read_file` `list_dir` `find_files` |
+| **2** | `researcher` | lê | allowlist | — | `+ fetch_url` |
+| **3** | `builder` | escreve | allowlist | — | `+ write_file` |
+| **4** | `operator` | escreve | allowlist | allowlist | `+ run_command` |
+
+O nível 0 não é inútil: é a linha de base. *"Dar acesso a arquivo melhorou?"* só tem resposta se existir a execução sem acesso a arquivo.
+
+### Internet e bloqueio de sites
+
+A allowlist nasce **vazia**. Quem sobe para o nível de rede tem de dizer onde o agente pode ir:
+
+```python
+from harness_eng import RESEARCHER
+
+politica = RESEARCHER.allowing("docs.python.org", "pypi.org").blocking("interno.pypi.org")
+h = Harness(model="claude-opus-5", policy=politica)
+```
+
+```bash
+harness-eng run "pesquise X" --level 2 --allow docs.python.org --block interno.exemplo.com
+harness-eng run "rode os testes" --level 4 --allow-command pytest --allow-command git
+```
+
+Quatro detalhes que decidem se a política é real ou decorativa:
+
+- **Bloqueio vence allowlist.** Você quer "tudo em `exemplo.com`, menos `interno.exemplo.com`"; a ordem inversa faria a exceção não valer nada.
+- **Subdomínio casa com ponto.** `pypi.org` libera `api.pypi.org` e **não** libera `naopypi.org`. Esquecer o ponto é o jeito clássico de uma allowlist deixar passar um domínio parecido.
+- **Redirecionamento revalida.** Um domínio liberado responde 302 para um bloqueado e o cliente HTTP segue sozinho — a forma clássica de furar allowlist, e invisível para qualquer teste que só busque URLs bem-comportadas.
+- **`run_command` roda sem shell.** A allowlist casa o primeiro token, e isso só significa algo se o primeiro token for de fato o executável: com shell, `pytest && curl ...` passaria pela checagem. Perder pipe e redirecionamento é o preço de a checagem não ser teatro.
+
+### A parte que ninguém mede: a parede
+
+Uma política que bloqueia **em silêncio** não ensina nada. Você fica sabendo que o agente falhou — não que ele bateu numa parede. Aqui toda negativa é contada, com motivo e alvo, e vira métrica:
+
+```bash
+harness-eng analyze traces/
+```
+
+```
+POLÍTICA
+  o nível apertou: 23 negativas em 6 de 8 sessões, mais em 'stackoverflow.com'.
+     14x  tentou stackoverflow.com
+      9x  tentou github.com
+```
+
+Duas leituras, as duas caras e as duas invisíveis sem isto:
+
+| O relatório diz | Significa |
+|---|---|
+| **"o nível sobrou"** — `fetch_url` concedida e nunca usada | Risco carregado de graça. Ninguém percebe, porque nada dá errado — é por nada dar errado que o excesso sobrevive por anos. |
+| **"o nível apertou"** — 23 negativas, mais em `stackoverflow.com` | O agente contornou. Aparece como execução mais longa e mais cara, e é atribuído ao modelo, ao prompt, à tarefa — a qualquer coisa menos à política, porque a parede não estava no relatório. |
+
+E o veredito nunca afirma além da amostra: abaixo de 5 sessões ele diz *"indício, não conclusão"*. Um relatório que chama n=2 de evidência comete o mesmo erro que este repositório documenta na própria camada estatística.
+
+> **Negativa é contada separado de falha.** Para o modelo as duas são erro — ele precisa ver as duas. Para a medição são opostas: falha significa que algo quebrou, negativa significa que a política funcionou. Somá-las produziria uma taxa de erro que **sobe quando você aperta a segurança**.
+
+O nível inteiro vai para o trace, não só o número — nível é um rótulo que depende de uma tabela que muda entre versões, e o trace precisa dizer o que estava concedido *naquela* execução.
+
+---
+
 ## Medir
 
 Toda execução vira um **trace**: um registro do que aconteceu, turno a turno.
@@ -264,15 +335,18 @@ harness_eng/
 │   ├── tools.py     erro, retry, falha silenciosa, chamada sem resposta
 │   ├── loops.py     repetição, retry cego, oscilação
 │   ├── context.py   crescimento, concentração, cache
-│   └── cost.py      custo por modelo, por sessão, por chamada
+│   ├── cost.py      custo por modelo, por sessão, por chamada
+│   └── policy.py    o nível serviu? concedeu demais? concedeu de menos?
 ├── stats/           pareado, bootstrap, tamanho de efeito, poder
 ├── core/            o harness: loop, ferramentas, clientes
+│   ├── policy.py    níveis: os eixos, os graus e a contagem de negativas
+│   └── toolkit.py   as ferramentas de cada nível e onde a política é aplicada
 └── cli.py
 ```
 
 A regra: `trace/model.py`, `metrics/` e `stats/` são **puros**. Não conhecem provedor, não tocam disco, não abrem rede. `core/` importa `trace/`; nunca o contrário.
 
-Isso não é purismo — é o que faz **136 testes rodarem em 5 segundos** sem transcript, sem chave de API e sem instalar nada além do `pytest`. `tests/test_layering.py` quebra o build quando a seta inverte, e as regras foram verificadas contra violação plantada: regra de arquitetura que nunca falhou não protege nada.
+Isso não é purismo — é o que faz **170 testes rodarem em 5 segundos** sem transcript, sem chave de API e sem instalar nada além do `pytest`. `tests/test_layering.py` quebra o build quando a seta inverte, e as regras foram verificadas contra violação plantada: regra de arquitetura que nunca falhou não protege nada.
 
 ---
 
@@ -291,6 +365,10 @@ O repositório aplica em si o que cobra dos outros.
 **O formato canônico tinha um buraco, e escrever o harness foi o que revelou.** `pause_turn` é um motivo de parada real e não existia no `StopReason`; virava `UNKNOWN`. Não apareceu em revisão de código nem nos 54 transcripts — apareceu quando um consumidor novo precisou do caso. É o argumento a favor do segundo adapter: um formato só prova ser comum quando alguém que não o escreveu tenta usá-lo.
 
 **O segundo formato cobrou três diferenças, e as três viraram teste.** Escrever o cliente do formato *chat completions* mostrou que ali um resultado de ferramenta é uma mensagem por resultado, os argumentos chegam como string JSON, e `prompt_tokens` **já inclui** o cache lido — esta última erra em silêncio: repassar o número cru contaria o cache duas vezes e inflaria o tamanho de contexto medido, num relatório cujo assunto é crescimento de contexto.
+
+**A regra de camadas nova nasceu errada, e reprovou o próprio docstring.** A primeira versão grepava o texto do arquivo; o primeiro módulo a citar `harness_eng.core` num docstring — justamente para dizer que **não** o importa — foi reprovado. Trocada por leitura de AST. A lição já estava escrita no mesmo arquivo, para outra regra, e eu a repeti mesmo assim: *um teste de arquitetura que dá falso positivo é desligado numa semana, e aí não protege nada.*
+
+**`analyze` quebrava num trace curto, e o defeito era da apresentação.** As métricas devolvem `None` quando não há o que medir — "ausência é ausência" atravessa o pacote inteiro. O formatador do relatório não sabia disso e estourava `TypeError` no meio da saída. A métrica seguia a regra da casa; a apresentação, não.
 
 **Três erros do próprio pacote de estatística, todos achados medindo.** Estão na seção recolhida acima e no histórico de commits, porque um repositório que prega medição e esconde os próprios erros de medição não vale nada.
 
@@ -314,6 +392,7 @@ Os transcripts **nunca** entram no repositório — `.gitignore` cobre `*.jsonl`
 | Harness mínimo + trace nativo | pronto, com round-trip verificado |
 | Clientes Anthropic e formato OpenAI | pronto |
 | API amigável (`Harness`, `@tool`) | pronto — 30 linhas viraram 8 |
+| Níveis de harness (arquivo, rede, comando, orçamento) | pronto, com negativas contadas |
 | CLI (`analyze`, `compare`, `power`, `run`) | pronto |
 | Relatório em HTML (`report/`) | próximo |
 
