@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence, get_args, get_origin
 
 from ..trace.model import ToolCall, ToolResult
+from .policy import DenialLog
 from .ports import ToolSpec
 
 #: Assinatura de um executor: recebe os argumentos, devolve texto.
@@ -73,6 +74,10 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, RegisteredTool] = {}
+        #: O que a política negou, por motivo e alvo. Mesmo padrão de
+        #: ``ClaudeCodeSource.skipped``: negar em silêncio esconde a informação mais útil
+        #: que um nível de harness produz — se ele serve ou não para a tarefa.
+        self.denials = DenialLog()
 
     def register(self, spec: ToolSpec, handler: Handler) -> "ToolRegistry":
         """Registro explícito: você traz o schema. Prefira :meth:`add` quando for função."""
@@ -125,6 +130,13 @@ class ToolRegistry:
         try:
             output = tool.handler(call.arguments)
         except ToolError as exc:
+            # Negativa de política é contada à parte. Para o modelo as duas são erro — ele
+            # precisa ver as duas —, mas para a medição são opostas: falha significa que
+            # algo quebrou, negativa significa que a política funcionou. Somá-las produz
+            # uma taxa de erro que sobe quando você aperta a segurança.
+            decision = getattr(exc, "decision", None)
+            if decision is not None:
+                self.denials.record(decision)
             return self._failure(call, str(exc), started)
         except Exception as exc:  # noqa: BLE001 — ver docstring: nunca levanta
             return self._failure(call, f"{type(exc).__name__}: {exc}", started)

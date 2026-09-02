@@ -24,12 +24,16 @@ from pathlib import Path
 # Uma versao so, definida no pacote. Duas copias divergem — e ja tinham divergido.
 from . import __version__
 from .core.clients import DEFAULT_MODEL, AnthropicClient, ScriptedClient
-from .core.loop import DEFAULT_MAX_ITERATIONS, AgentLoop
+from .core.loop import AgentLoop
+from .core.policy import LEVELS
+from .core.policy import level as level_of
 from .core.ports import ModelError, ModelResponse
+from .core.toolkit import policy_registry
 from .core.tools import workspace_registry
 from .metrics.context import profile_cache, profile_context
 from .metrics.cost import cost_per_session, estimate_cost
 from .metrics.loops import detect_loops
+from .metrics.policy import analyse_policy
 from .metrics.tools import analyse_tools
 from .stats.compare import compare_paired
 from .stats.design import describe_baseline, required_pairs
@@ -74,14 +78,26 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("prompt", help="a tarefa")
     run.add_argument("--workspace", type=Path, default=Path("."),
                      help="raiz que as ferramentas de leitura podem enxergar")
+    run.add_argument("--level", type=int, default=None, choices=sorted(LEVELS),
+                     help="nível de harness: " + " · ".join(
+                         f"{n}={p.name}" for n, p in sorted(LEVELS.items())))
+    run.add_argument("--allow", action="append", default=[], metavar="DOMINIO",
+                     help="libera um domínio (repetível). Só vale a partir do nível 2")
+    run.add_argument("--block", action="append", default=[], metavar="DOMINIO",
+                     help="bloqueia um domínio (repetível). Bloqueio vence allowlist")
+    run.add_argument("--allow-command", action="append", default=[], metavar="EXE",
+                     help="libera um executável (repetível). Só vale no nível 4")
     run.add_argument("--out", type=Path, default=None,
                      help="onde gravar o trace (padrão: reports/native/<sessão>.jsonl)")
     run.add_argument("--model", default=_env("HARNESS_MODEL", DEFAULT_MODEL))
     run.add_argument("--effort", default=_env("HARNESS_EFFORT", "high"),
                      choices=["low", "medium", "high", "xhigh", "max"])
     run.add_argument("--max-tokens", type=int, default=int(_env("HARNESS_MAX_TOKENS", "16000")))
+    # Sem valor explícito, o teto do nível vale. Com um padrão fixo aqui, ``--level 0``
+    # rodaria com 50 iterações em vez das 20 do nível — e o teto do nível seria letra
+    # morta sem ninguém notar.
     run.add_argument("--max-iterations", type=int,
-                     default=int(_env("HARNESS_MAX_ITERATIONS", str(DEFAULT_MAX_ITERATIONS))))
+                     default=_env_int("HARNESS_MAX_ITERATIONS"))
     run.add_argument("--dry-run", action="store_true",
                      help="roteiro fixo em vez do modelo: exercita o loop inteiro "
                           "sem chave nem custo")
@@ -125,6 +141,21 @@ def _env(name: str, fallback: str) -> str:
     return os.environ.get(name) or fallback
 
 
+def _env_int(name: str) -> int | None:
+    """
+    Inteiro de uma variável de ambiente, ou ``None`` quando não está definida.
+
+    ``None`` e não um padrão: quem consome precisa distinguir "o usuário escolheu" de
+    "ninguém disse nada", porque no segundo caso é o nível de harness que decide.
+    """
+    raw = _env(name, "")
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        print(f"aviso: {name}={raw!r} não é um inteiro — ignorado", file=sys.stderr)
+        return None
+
+
 def _load(root: Path | None) -> tuple[TraceSet, Counter]:
     """
     Carrega todo trace legível sob ``root``, de qualquer origem conhecida.
@@ -166,6 +197,22 @@ def _load(root: Path | None) -> tuple[TraceSet, Counter]:
     return traces, skipped
 
 
+def _num(value: float | int | None, *, dash: str = "—") -> str:
+    """
+    Número para o relatório, com ``None`` virando travessão em vez de exceção.
+
+    Existe porque o pacote inteiro devolve ``None`` para "não deu para medir", e uma
+    apresentação que não sabe disso transforma um trace curto — que é dado legítimo — em
+    ``TypeError`` no meio do relatório.
+    """
+    return dash if value is None else f"{value:,.0f}"
+
+
+def _pct(value: float | None, *, casas: int = 2, dash: str = "—") -> str:
+    """Porcentagem, com ``None`` virando travessão. Mesma razão de :func:`_num`."""
+    return dash if value is None else f"{value:.{casas}%}"
+
+
 def _redact(text: str | None) -> str | None:
     """
     Hash estável de 8 caracteres. Estável para o mesmo texto continuar comparável entre
@@ -184,6 +231,7 @@ def _analyze(args) -> int:
     context = profile_context(traces)
     cache = profile_cache(traces)
     cost = estimate_cost(traces)
+    policy_fit = analyse_policy(traces)
 
     if args.json:
         payload = {
@@ -193,6 +241,7 @@ def _analyze(args) -> int:
             "context": context.as_dict(),
             "cache": cache.as_dict(),
             "cost": cost.as_dict(),
+            "policy": policy_fit.as_dict(),
             "adapter_skipped": dict(skipped_by_reason),
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -202,16 +251,17 @@ def _analyze(args) -> int:
     print(f"\n{len(traces)} sessões · {turns:,} turnos · {tools.total_calls:,} chamadas de ferramenta\n")
 
     print("FERRAMENTAS")
-    print(f"  taxa de erro geral: {tools.overall_error_rate:.2%}")
+    print(f"  taxa de erro geral: {_pct(tools.overall_error_rate)}")
     ranked = [t for t in tools.ranked_by_error_rate(only_with_signal=False) if t.calls >= 10]
     for health in ranked[:12]:
         flag = "  ← outlier" if health in tools.outliers() else ""
         signal = "" if health.has_signal else "  (amostra pequena)"
-        print(f"    {health.name:18} {health.calls:>6} chamadas  {health.error_rate:>6.1%}{flag}{signal}")
+        taxa = _pct(health.error_rate, casas=1)
+        print(f"    {health.name:18} {health.calls:>6} chamadas  {taxa:>6}{flag}{signal}")
 
     print("\nLOOPS")
     print(f"  {len(loops.repeats)} padrões de repetição, "
-          f"{loops.wasted_calls} chamadas desperdiçadas ({loops.waste_rate:.1%})")
+          f"{loops.wasted_calls} chamadas desperdiçadas ({_pct(loops.waste_rate, casas=1)})")
     print(f"  {len(loops.blind_retries)} retries cegos · {len(loops.oscillations)} oscilações")
     for repeat in loops.worst(3):
         argument = _redact(repeat.sample_argument) if args.redact else (repeat.sample_argument or "")
@@ -219,15 +269,20 @@ def _analyze(args) -> int:
 
     print("\nCONTEXTO")
     print(f"  pico            {context.peak:,} tokens")
-    print(f"  crescimento/turno  mediana {context.median_growth:,.0f} · "
-          f"média {context.mean_growth:,.0f} · p95 {context.p95_growth:,}")
+    # As métricas devolvem ``None`` quando não houve turno medível, e está certo —
+    # "ausência é ausência" atravessa o pacote inteiro. Quem estava errado era este
+    # formatador, que estourava ``TypeError`` e derrubava o relatório inteiro num trace
+    # curto: a métrica seguia a regra e a apresentação, não.
+    print(f"  crescimento/turno  mediana {_num(context.median_growth)} · "
+          f"média {_num(context.mean_growth)} · p95 {_num(context.p95_growth)}")
     if context.growth_concentration is not None:
         print(f"  concentração    {context.growth_concentration:.0%} do crescimento vem dos 5% de turnos mais caros")
     print(f"  truncamentos    {context.truncations}")
 
     print("\nCACHE")
-    print(f"  acerto          {cache.hit_rate:.1%}")
-    print(f"  rewrite ratio   {cache.rewrite_ratio:.3f} (escrito por token lido)")
+    print(f"  acerto          {_pct(cache.hit_rate, casas=1)}")
+    escrito = "—" if cache.rewrite_ratio is None else f"{cache.rewrite_ratio:.3f}"
+    print(f"  rewrite ratio   {escrito} (escrito por token lido)")
 
     print("\nCUSTO")
     print(f"  total estimado  US$ {cost.total:,.2f}" + ("" if cost.is_complete else "  (INCOMPLETO)"))
@@ -235,6 +290,12 @@ def _analyze(args) -> int:
         print(f"    {model:22} US$ {value:>10,.2f}")
     if not cost.is_complete:
         print(f"  sem preço: {', '.join(cost.unpriced_models)} ({cost.unpriced_tokens:,} tokens)")
+
+    if policy_fit.with_policy:
+        print("\nPOLÍTICA")
+        print(f"  {policy_fit.verdict()}")
+        for alvo, vezes in list(policy_fit.blocked_targets.items())[:5]:
+            print(f"    {vezes:>3}x  tentou {alvo}")
 
     skipped = sum(skipped_by_reason.values())
     if skipped:
@@ -317,7 +378,20 @@ def _run(args) -> int:
         print(f"erro: workspace não é um diretório: {workspace}", file=sys.stderr)
         return 2
 
-    registry = workspace_registry(workspace)
+    # Sem --level, o comportamento antigo: leitura do workspace, sem politica. Com
+    # --level, o nivel decide o conjunto inteiro e o trace grava o que foi concedido.
+    policy = None
+    if args.level is not None:
+        policy = level_of(args.level)
+        if args.allow:
+            policy = policy.allowing(*args.allow)
+        if args.block:
+            policy = policy.blocking(*args.block)
+        if args.allow_command:
+            policy = policy.with_(allowed_commands=frozenset(args.allow_command))
+        registry = policy_registry(policy, workspace)
+    else:
+        registry = workspace_registry(workspace)
 
     if args.dry_run:
         # Roteiro fixo: lista o workspace e encerra. Exercita loop, executor, trace e
@@ -349,7 +423,11 @@ def _run(args) -> int:
             print(f"erro: {exc}", file=sys.stderr)
             return 2
 
-    loop = AgentLoop(client, registry, max_iterations=args.max_iterations, cwd=str(workspace))
+    loop = AgentLoop(client, registry, policy=policy,
+                     max_iterations=args.max_iterations, cwd=str(workspace))
+    # O teto que de fato valeu: o do argumento, o do nível, ou o padrão. Reportar
+    # ``args.max_iterations`` mostraria ``None`` quando o nível decidiu.
+    loop_ceiling = loop._max_iterations
     try:
         outcome = loop.run(args.prompt)
     except KeyboardInterrupt:
@@ -365,7 +443,15 @@ def _run(args) -> int:
 
     usage = outcome.session.total_usage
     print(f"\n{outcome.status.value.upper()} — {outcome.detail}")
-    print(f"  iterações       {outcome.iterations}/{args.max_iterations}")
+    if policy is not None:
+        print(f"  política        {policy}")
+        if registry.denials.total:
+            motivos = ", ".join(
+                f"{motivo.value} ({vezes}x)"
+                for motivo, vezes in registry.denials.by_reason.items()
+            )
+            print(f"  paredes         {registry.denials.total} negativas — {motivos}")
+    print(f"  iterações       {outcome.iterations}/{loop_ceiling}")
     print(f"  turnos          {outcome.turns}")
     print(f"  ferramentas     {outcome.tool_calls} chamadas")
     errors = sum(1 for _, result in outcome.session.paired_calls() if result and result.is_error)

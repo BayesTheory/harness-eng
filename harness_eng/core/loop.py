@@ -30,6 +30,7 @@ from enum import Enum
 from typing import Callable
 
 from ..trace.model import Role, Session, StopReason, ToolCall, ToolResult, Turn
+from .policy import Policy
 from .ports import ModelClient, ModelError
 from .tools import ToolRegistry
 
@@ -46,9 +47,10 @@ class LoopStatus(str, Enum):
     """
     Como a execução terminou. Estado medido, não suposto.
 
-    Existem cinco valores porque existem cinco desfechos distintos, e achatá-los em
-    ``sucesso``/``falha`` apagaria a diferença entre "o modelo terminou" e "eu desliguei o
-    modelo no meio" — que é precisamente a diferença que interessa a quem está medindo.
+    Cada valor é um desfecho distinto, e achatá-los em ``sucesso``/``falha`` apagaria a
+    diferença entre "o modelo terminou" e "eu desliguei o modelo no meio" — que é
+    precisamente a diferença que interessa a quem está medindo. ``BUDGET_EXHAUSTED`` é o
+    caso mais recente: o nível de harness tinha teto de tokens e o teto chegou primeiro.
     """
 
     COMPLETED = "completed"
@@ -56,6 +58,7 @@ class LoopStatus(str, Enum):
     TRUNCATED = "truncated"
     REFUSED = "refused"
     MODEL_ERROR = "model_error"
+    BUDGET_EXHAUSTED = "budget_exhausted"
 
     @property
     def finished_on_its_own(self) -> bool:
@@ -126,14 +129,22 @@ class AgentLoop:
         client: ModelClient,
         registry: ToolRegistry,
         *,
-        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        policy: Policy | None = None,
+        max_iterations: int | None = None,
         cwd: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        # A política manda no teto, a menos que quem chamou tenha dito outro número. O
+        # sentinela ``None`` é o que torna as duas coisas distinguíveis — com um inteiro
+        # padrão não dá para saber se o valor veio do chamador ou do default, e o teto do
+        # nível seria ignorado em silêncio.
+        if max_iterations is None:
+            max_iterations = policy.max_iterations if policy else DEFAULT_MAX_ITERATIONS
         if max_iterations < 1:
             raise ValueError("max_iterations precisa ser pelo menos 1")
         self._client = client
         self._registry = registry
+        self._policy = policy
         self._max_iterations = max_iterations
         # Onde a execução aconteceu. Campo canônico, e o que permite comparar sessões do
         # mesmo projeto entre harnesses — sem ele o trace nativo entra na análise sem a
@@ -210,6 +221,18 @@ class AgentLoop:
                 detail = "resposta cortada por max_tokens"
                 break
 
+            if self._policy is not None:
+                # Orçamento conferido depois de gravar o turno: o token já foi gasto, e um
+                # trace que omite o turno que estourou o teto esconde justamente o turno
+                # que explica a conta.
+                spent = sum(t.usage.total_tokens for t in turns if t.usage)
+                budget = self._policy.check_budget(spent)
+                if not budget.allowed:
+                    self._registry.denials.record(budget)
+                    status = LoopStatus.BUDGET_EXHAUSTED
+                    detail = budget.message
+                    break
+
             if calls:
                 turns.append(self._execute(calls, len(turns)))
                 continue
@@ -238,6 +261,12 @@ class AgentLoop:
                 "max_iterations": self._max_iterations,
                 "model": self._client.model,
                 "tools": [spec.name for spec in specs],
+                # A politica INTEIRA, nao so o numero do nivel: nivel e um rotulo que
+                # depende de uma tabela que muda entre versoes, e o trace precisa dizer o
+                # que estava concedido quando aquela execucao aconteceu.
+                "policy": self._policy.as_dict() if self._policy else None,
+                # O que a parede segurou. E a metade da medicao que nenhum harness reporta.
+                "denials": self._registry.denials.as_dict(),
             },
         )
         return RunOutcome(session=session, status=status, iterations=iteration, detail=detail)

@@ -51,6 +51,33 @@ def _imported_roots(path: Path) -> set[str]:
     return roots
 
 
+def _imported_modules(path: Path) -> set[str]:
+    """
+    Módulos importados pelo nome completo, incluindo os relativos.
+
+    Devolve ``core.policy`` tanto para ``from harness_eng.core.policy import X`` quanto
+    para ``from ..core.policy import X``, normalizando as duas formas de escrever a mesma
+    dependência. Ler o AST em vez de grepar o texto não é preciosismo: a primeira versão
+    desta regra grepava o arquivo, e o primeiro módulo a citar ``harness_eng.core`` **num
+    docstring** — para dizer que NÃO o importa — reprovou. Um teste de arquitetura que dá
+    falso positivo é desligado numa semana, e a lição já estava escrita mais abaixo neste
+    mesmo arquivo, para outra regra.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
+
+
+def _is_core(module: str) -> bool:
+    """Se o módulo importado é o harness — na forma absoluta ou na relativa."""
+    return module == "core" or module.startswith(("core.", "harness_eng.core"))
+
+
 ALL_PURE_FILES = [p for relative in PURE_MODULES for p in _python_files(relative)]
 
 
@@ -158,10 +185,11 @@ def test_nothing_measurable_depends_on_the_harness() -> None:
     """
     for relative in ("trace/model.py", "trace/ports.py", "trace/sources", "metrics", "stats"):
         for path in _python_files(relative):
-            source = path.read_text(encoding="utf-8")
-            assert "harness_eng.core" not in source and "from ..core" not in source, (
-                f"{path.relative_to(PACKAGE)} importa o harness. A camada de medição existe "
-                f"para medir harness de terceiro também — ela não pode depender do nosso."
+            offenders = sorted(m for m in _imported_modules(path) if _is_core(m))
+            assert not offenders, (
+                f"{path.relative_to(PACKAGE)} importa o harness ({offenders}). A camada de "
+                f"medição existe para medir harness de terceiro também — ela não pode "
+                f"depender do nosso."
             )
 
 

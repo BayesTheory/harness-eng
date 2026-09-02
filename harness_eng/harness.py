@@ -31,8 +31,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .core.clients import DEFAULT_MAX_TOKENS, DEFAULT_MODEL, AnthropicClient
-from .core.loop import DEFAULT_MAX_ITERATIONS, AgentLoop, RunOutcome
+from .core.loop import AgentLoop, RunOutcome
+from .core.policy import Policy
+from .core.policy import level as level_of
 from .core.ports import ModelClient
+from .core.toolkit import policy_registry
 from .core.tools import ToolRegistry, workspace_registry
 from .metrics.context import profile_cache
 from .metrics.tools import analyse_tools
@@ -56,6 +59,12 @@ class Harness:
     ``.model`` e ``.complete(conversa, tools)`` — é a porta
     :class:`~harness_eng.core.ports.ModelClient`, e é o que torna o pacote utilizável com
     qualquer provedor sem tocar no loop, nas métricas ou no formato de trace.
+
+    ``level`` escolhe um nível de harness (0 a 4) e com ele o conjunto de ferramentas
+    concedidas; ``policy`` aceita uma :class:`~harness_eng.core.policy.Policy` montada à
+    mão, para quando os níveis nomeados não servirem. Os dois juntos são erro, e não a
+    silenciosa precedência de um sobre o outro — que só apareceria como "por que este
+    agente tem internet?" muito depois.
     """
 
     def __init__(
@@ -64,18 +73,34 @@ class Harness:
         model: str = DEFAULT_MODEL,
         client: ModelClient | None = None,
         system: str | None = DEFAULT_SYSTEM,
-        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        level: int | None = None,
+        policy: Policy | None = None,
+        max_iterations: int | None = None,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         effort: str = "high",
         workspace: Path | str | None = None,
         file_tools: bool = False,
     ) -> None:
+        if level is not None and policy is not None:
+            raise ValueError("passe 'level' ou 'policy', não os dois")
+        if policy is not None:
+            self.policy: Policy | None = policy
+        elif level is not None:
+            self.policy = level_of(level)
+        else:
+            self.policy = None
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()
-        # As ferramentas de arquivo são opt-in. Uma biblioteca que dá leitura do disco ao
-        # modelo por padrão decide sozinha uma questão que é do usuário.
-        self.registry = (
-            workspace_registry(self.workspace) if file_tools else ToolRegistry()
-        )
+
+        # Três caminhos, em ordem de precedência. O nível decide o conjunto inteiro de
+        # ferramentas; ``file_tools`` é o atalho antigo, sem política; e sem nenhum dos
+        # dois o registro nasce vazio — uma biblioteca que dá leitura de disco ao modelo
+        # por padrão decide sozinha uma questão que é do usuário.
+        if self.policy is not None:
+            self.registry = policy_registry(self.policy, self.workspace)
+        elif file_tools:
+            self.registry = workspace_registry(self.workspace)
+        else:
+            self.registry = ToolRegistry()
         self.client: ModelClient = client or AnthropicClient(
             model=model, system=system, max_tokens=max_tokens, effort=effort
         )
@@ -118,6 +143,7 @@ class Harness:
         loop = AgentLoop(
             self.client,
             self.registry,
+            policy=self.policy,
             max_iterations=self._max_iterations,
             cwd=str(self.workspace),
         )
@@ -182,6 +208,10 @@ class Run:
                 lines.append(
                     f"    {tool_health.name}: {tool_health.errors}/{tool_health.calls} falharam"
                 )
+        negadas = self.outcome.session.metadata.get("denials") or {}
+        if negadas.get("total"):
+            motivos = ", ".join(f"{r} ({c}x)" for r, c in (negadas.get("by_reason") or {}).items())
+            lines.append(f"  paredes     {negadas['total']} negativas — {motivos}")
         lines.append(f"  tokens      {usage.total_tokens:,}")
         if cache.hit_rate:
             lines.append(f"  cache       {cache.hit_rate:.1%} de acerto")
