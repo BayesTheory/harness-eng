@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness-eng"
-version = "0.1.0"
-description = "Ferramentas para medir harnesses de agente: formato de trace agnostico, metricas de ferramenta/loop/contexto/custo, e comparacao estatistica pareada."
+version = "0.2.0"
+description = "Rode agentes de IA com qualquer modelo — e meca o que eles fizeram: trace agnostico, metricas de ferramenta/loop/contexto/custo e comparacao estatistica pareada."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

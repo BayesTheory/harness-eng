@@ -21,6 +21,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+# Uma versao so, definida no pacote. Duas copias divergem — e ja tinham divergido.
+from . import __version__
 from .core.clients import DEFAULT_MODEL, AnthropicClient, ScriptedClient
 from .core.loop import DEFAULT_MAX_ITERATIONS, AgentLoop
 from .core.ports import ModelError, ModelResponse
@@ -34,8 +36,6 @@ from .stats.design import describe_baseline, required_pairs
 from .trace.model import StopReason, ToolCall, TraceSet
 from .trace.sources.claude_code import ClaudeCodeSource, default_root
 from .trace.sources.native import NativeSink, NativeSource
-
-__version__ = "0.1.0"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sources":
         print("claude_code   ~/.claude/projects/**/*.jsonl")
         print("native        traces do harness deste repositório (harness-eng run)")
-        print("openai        (planejado)")
+        print("openai        formato chat completions — OpenAI, Ollama, vLLM, Groq...")
         return 0
     return 1
 
