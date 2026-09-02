@@ -45,9 +45,9 @@ from __future__ import annotations
 
 import random
 import statistics
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Mapping, Sequence
 
 from .parametric import TTestResult, difference_skewness, paired_t_test
 
@@ -68,7 +68,7 @@ class EffectSize(str, Enum):
     LARGE = "grande"
 
     @classmethod
-    def of(cls, delta: float) -> "EffectSize":
+    def of(cls, delta: float) -> EffectSize:
         magnitude = abs(delta)
         if magnitude < NEGLIGIBLE:
             return cls.NEGLIGIBLE
@@ -228,7 +228,8 @@ class Comparison:
                 f"{self.label_b} ({reason}, n={self.n_pairs})"
             )
         change = self.relative_change
-        change_text = f", {abs(change):.0%} " + ("menor" if change and change < 0 else "maior") if change else ""
+        direcao = "menor" if change and change < 0 else "maior"
+        change_text = f", {abs(change):.0%} {direcao}" if change else ""
         consistency = (
             f"vence em {self.dominance:.0%} das tarefas, " if self.is_paired else ""
         )
@@ -409,7 +410,10 @@ def compare_paired(
 
     values_a = [float(a[k]) for k in shared]
     values_b = [float(b[k]) for k in shared]
-    differences = [vb - va for va, vb in zip(values_a, values_b)]
+    # ``strict`` documenta a invariante: as duas listas vêm do mesmo ``shared``, então têm
+    # o mesmo tamanho por construção. Se um dia deixarem de ter, o pareamento silenciosamente
+    # descartaria o excesso — e uma comparação pareada que perde pares mede outra coisa.
+    differences = [vb - va for va, vb in zip(values_a, values_b, strict=True)]
 
     return Comparison(
         metric=metric,

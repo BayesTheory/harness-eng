@@ -20,10 +20,11 @@ import re
 import time
 import types
 import typing
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence, get_args, get_origin
+from typing import Any, get_args, get_origin
 
 from ..trace.model import ToolCall, ToolResult
 from .policy import DenialLog
@@ -79,14 +80,14 @@ class ToolRegistry:
         #: que um nível de harness produz — se ele serve ou não para a tarefa.
         self.denials = DenialLog()
 
-    def register(self, spec: ToolSpec, handler: Handler) -> "ToolRegistry":
+    def register(self, spec: ToolSpec, handler: Handler) -> ToolRegistry:
         """Registro explícito: você traz o schema. Prefira :meth:`add` quando for função."""
         if spec.name in self._tools:
             raise ValueError(f"ferramenta duplicada: {spec.name}")
         self._tools[spec.name] = RegisteredTool(spec=spec, handler=handler)
         return self
 
-    def add(self, *functions: Callable[..., Any]) -> "ToolRegistry":
+    def add(self, *functions: Callable[..., Any]) -> ToolRegistry:
         """
         Registra funções direto, derivando o schema da assinatura.
 

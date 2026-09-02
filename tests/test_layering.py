@@ -128,9 +128,12 @@ def _code_identifiers_and_literals(path: Path) -> set[str]:
             found.add(node.id.lower())
         elif isinstance(node, ast.Attribute):
             found.add(node.attr.lower())
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value not in docstrings:
-                found.add(node.value.lower())
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value not in docstrings
+        ):
+            found.add(node.value.lower())
     return found
 
 

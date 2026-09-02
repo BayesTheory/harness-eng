@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 from ..trace.model import Role, StopReason, ToolCall, Turn, Usage
 from .ports import ModelError, ModelResponse, ToolSpec

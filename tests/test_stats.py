@@ -55,8 +55,10 @@ class TestCliffsDelta:
         """
         rng = random.Random(7)
         for _ in range(200):
-            a = [rng.choice([rng.gauss(0, 1), rng.randint(0, 3)]) for _ in range(rng.randint(1, 40))]
-            b = [rng.choice([rng.gauss(0.3, 1), rng.randint(0, 3)]) for _ in range(rng.randint(1, 40))]
+            a = [rng.choice([rng.gauss(0, 1), rng.randint(0, 3)])
+                 for _ in range(rng.randint(1, 40))]
+            b = [rng.choice([rng.gauss(0.3, 1), rng.randint(0, 3)])
+                 for _ in range(rng.randint(1, 40))]
             assert cliffs_delta(a, b) == pytest.approx(naive_cliffs_delta(a, b), abs=1e-12)
 
     def test_ties_are_counted_as_neither(self):
@@ -369,9 +371,9 @@ class TestVerdictMethodSelection:
         Um teste mal especificado é pior que um liberal: o liberal erra numa direção
         conhecida e reportada; o mal especificado erra numa direção que ninguém sabe.
         """
-        rng = random.Random(4)
         base = {f"t{i}": 100.0 for i in range(30)}
         # Poucas tarefas melhoram muitíssimo: diferenças fortemente assimétricas.
+        # Sem sorteio de propósito: a assimetria aqui é construída, não amostrada.
         skewed = {t: (v - 400.0 if i < 3 else v - 1.0) for i, (t, v) in enumerate(base.items())}
         result = compare_paired(base, skewed)
         assert not result.differences_are_symmetric

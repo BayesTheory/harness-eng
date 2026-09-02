@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import random
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from .compare import DEFAULT_CONFIDENCE, paired_bootstrap
 
@@ -81,7 +81,9 @@ def estimate_power(
         # entre tarefas — e um cálculo de poder otimista é pior que nenhum.
         sample_a = [baseline[rng.randrange(len(baseline))] for _ in range(n_pairs)]
         sample_b = [v * (1.0 - relative_effect) * rng.uniform(0.85, 1.15) for v in sample_a]
-        differences = [b - a for a, b in zip(sample_a, sample_b)]
+        # ``strict``: ``sample_b`` é derivado de ``sample_a`` elemento a elemento, então o
+        # tamanho é o mesmo por construção. Perder um par aqui enviesaria o poder estimado.
+        differences = [b - a for a, b in zip(sample_a, sample_b, strict=True)]
         if paired_bootstrap(differences, resamples, confidence, seed=None).excludes_zero:
             detected += 1
 

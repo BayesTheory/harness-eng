@@ -27,9 +27,9 @@ silenciosamente, e o custo do erro é assimétrico.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Mapping
 from urllib.parse import urlparse
 
 
@@ -223,7 +223,7 @@ class Policy:
         return ALLOWED
 
     # ── composição ───────────────────────────────────────────────────────────────────
-    def with_(self, **changes: object) -> "Policy":
+    def with_(self, **changes: object) -> Policy:
         """
         Uma variante desta política. ``name`` vira ``custom`` a menos que você dê outro.
 
@@ -240,11 +240,11 @@ class Policy:
                 changes[key] = frozenset(changes[key])  # type: ignore[arg-type]
         return replace(self, **changes)  # type: ignore[arg-type]
 
-    def allowing(self, *domains: str) -> "Policy":
+    def allowing(self, *domains: str) -> Policy:
         """Atalho para o caso comum: mesma política, mais domínios liberados."""
         return self.with_(allowed_domains=self.allowed_domains | frozenset(domains))
 
-    def blocking(self, *domains: str) -> "Policy":
+    def blocking(self, *domains: str) -> Policy:
         return self.with_(blocked_domains=self.blocked_domains | frozenset(domains))
 
     def as_dict(self) -> dict:

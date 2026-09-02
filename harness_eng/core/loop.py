@@ -24,10 +24,10 @@ construtor. É o que permite testar cada um dos comportamentos acima sem chave d
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable
 
 from ..trace.model import Role, Session, StopReason, ToolCall, ToolResult, Turn
 from .policy import Policy

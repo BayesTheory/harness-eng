@@ -20,8 +20,8 @@ Puro sobre o formato canônico.
 from __future__ import annotations
 
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from ..trace.model import Session, StopReason, TraceSet
 
@@ -88,7 +88,9 @@ class ContextProfile:
         return {
             "turns_measured": self.turns_measured,
             "peak_context": self.peak,
-            "median_growth": round(self.median_growth, 1) if self.median_growth is not None else None,
+            "median_growth": (
+                round(self.median_growth, 1) if self.median_growth is not None else None
+            ),
             "mean_growth": round(self.mean_growth, 1) if self.mean_growth is not None else None,
             "p95_growth": self.p95_growth,
             "growth_concentration": (

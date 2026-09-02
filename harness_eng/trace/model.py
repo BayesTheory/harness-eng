@@ -16,10 +16,11 @@ dois é como uma média de velocidade de tacada afunda ao contar bolas que ningu
 """
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any
 
 
 class Role(str, Enum):
@@ -56,7 +57,7 @@ class StopReason(str, Enum):
     UNKNOWN = "unknown"
 
     @classmethod
-    def parse(cls, raw: str | None) -> "StopReason":
+    def parse(cls, raw: str | None) -> StopReason:
         if raw is None:
             return cls.UNKNOWN
         try:
@@ -111,7 +112,7 @@ class Usage:
     def total_tokens(self) -> int:
         return self.context_size + self.output_tokens
 
-    def __add__(self, other: "Usage") -> "Usage":
+    def __add__(self, other: Usage) -> Usage:
         """Soma para agregar sessão. ``service_tier`` some: não é somável."""
         return Usage(
             input_tokens=self.input_tokens + other.input_tokens,
@@ -128,7 +129,9 @@ class Usage:
             "cache_write_tokens": self.cache_write_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "context_size": self.context_size,
-            "cache_hit_rate": round(self.cache_hit_rate, 4) if self.cache_hit_rate is not None else None,
+            "cache_hit_rate": (
+                round(self.cache_hit_rate, 4) if self.cache_hit_rate is not None else None
+            ),
         }
 
 
@@ -385,7 +388,7 @@ class TraceSet:
     sessions: tuple[Session, ...] = ()
 
     @classmethod
-    def of(cls, sessions: Sequence[Session]) -> "TraceSet":
+    def of(cls, sessions: Sequence[Session]) -> TraceSet:
         return cls(tuple(sessions))
 
     def __iter__(self) -> Iterator[Session]:
@@ -394,7 +397,7 @@ class TraceSet:
     def __len__(self) -> int:
         return len(self.sessions)
 
-    def from_source(self, source: str) -> "TraceSet":
+    def from_source(self, source: str) -> TraceSet:
         return TraceSet(tuple(s for s in self.sessions if s.source == source))
 
     @property

@@ -10,8 +10,9 @@ embrulhar leitor de terceiro sem envolvê-lo numa hierarquia.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from .model import Session
 

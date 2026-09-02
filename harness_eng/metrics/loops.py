@@ -23,8 +23,8 @@ Puro sobre o formato canônico: nenhum acesso a disco, nenhuma dependência pesa
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 from ..trace.model import Session, ToolCall, TraceSet
 

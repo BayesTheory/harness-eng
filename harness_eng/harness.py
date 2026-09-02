@@ -27,8 +27,9 @@ existe para o caminho comum ser curto, não para ser o único caminho.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .core.clients import DEFAULT_MAX_TOKENS, DEFAULT_MODEL, AnthropicClient
 from .core.loop import AgentLoop, RunOutcome
@@ -123,7 +124,7 @@ class Harness:
 
         return decorate(fn) if fn is not None else decorate
 
-    def add(self, *functions: Callable[..., Any]) -> "Harness":
+    def add(self, *functions: Callable[..., Any]) -> Harness:
         """Registra funções já existentes. Devolve ``self`` para encadear."""
         self.registry.add(*functions)
         return self
@@ -133,7 +134,7 @@ class Harness:
         return tuple(spec.name for spec in self.registry.specs)
 
     # ── execução ─────────────────────────────────────────────────────────────────────
-    def run(self, prompt: str, *, save_to: Path | str | None = None) -> "Run":
+    def run(self, prompt: str, *, save_to: Path | str | None = None) -> Run:
         """
         Roda a tarefa. ``save_to`` grava o trace nativo no caminho dado.
 

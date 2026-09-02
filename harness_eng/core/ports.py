@@ -20,8 +20,9 @@ estado só, e ele é o que sai no relatório.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from ..trace.model import StopReason, ToolCall, Turn, Usage
 

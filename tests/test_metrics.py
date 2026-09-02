@@ -181,8 +181,9 @@ class TestContextAndCost:
         faz o p95 descrever um artefato em vez do turno caro real.
         """
         usages = [Usage(cache_read_tokens=n) for n in (1000, 2000, 3000)]
-        one = session(*[(call(i, "Bash"), result(i)) for i in range(3)], session_id="a", usages=usages)
-        two = session(*[(call(i, "Bash"), result(i)) for i in range(3)], session_id="b", usages=usages)
+        pares = [(call(i, "Bash"), result(i)) for i in range(3)]
+        one = session(*pares, session_id="a", usages=usages)
+        two = session(*pares, session_id="b", usages=usages)
         profile = profile_context([one, two])
         assert all(delta == 1000 for delta in profile.deltas)
         assert len(profile.deltas) == 4, "2 deltas por sessão, nenhum entre elas"
@@ -203,7 +204,10 @@ class TestContextAndCost:
         assert cache.hit_rate == pytest.approx(0.9)
 
     def test_unknown_model_is_a_gap_not_an_estimate(self):
-        turn = Turn(index=0, role=Role.ASSISTANT, model="modelo-inventado", usage=Usage(input_tokens=1000))
+        turn = Turn(
+            index=0, role=Role.ASSISTANT, model="modelo-inventado",
+            usage=Usage(input_tokens=1000),
+        )
         report = estimate_cost([Session(id="s", source="test", turns=(turn,))])
         assert not report.is_complete
         assert report.total == 0.0
@@ -224,7 +228,10 @@ class TestContextAndCost:
         assert report.total == pytest.approx(5.0)
 
     def test_custom_pricing_overrides_the_table(self):
-        turn = Turn(index=0, role=Role.ASSISTANT, model="meu-modelo", usage=Usage(output_tokens=1_000_000))
+        turn = Turn(
+            index=0, role=Role.ASSISTANT, model="meu-modelo",
+            usage=Usage(output_tokens=1_000_000),
+        )
         report = estimate_cost(
             [Session(id="s", source="test", turns=(turn,))],
             pricing={"meu-modelo": ModelPricing(1.0, 7.0)},

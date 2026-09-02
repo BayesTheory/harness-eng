@@ -248,7 +248,8 @@ def _analyze(args) -> int:
         return 0
 
     turns = sum(len(s) for s in traces)
-    print(f"\n{len(traces)} sessões · {turns:,} turnos · {tools.total_calls:,} chamadas de ferramenta\n")
+    print(f"\n{len(traces)} sessões · {turns:,} turnos · "
+          f"{tools.total_calls:,} chamadas de ferramenta\n")
 
     print("FERRAMENTAS")
     print(f"  taxa de erro geral: {_pct(tools.overall_error_rate)}")
@@ -264,7 +265,8 @@ def _analyze(args) -> int:
           f"{loops.wasted_calls} chamadas desperdiçadas ({_pct(loops.waste_rate, casas=1)})")
     print(f"  {len(loops.blind_retries)} retries cegos · {len(loops.oscillations)} oscilações")
     for repeat in loops.worst(3):
-        argument = _redact(repeat.sample_argument) if args.redact else (repeat.sample_argument or "")
+        bruto = repeat.sample_argument or ""
+        argument = _redact(bruto) if args.redact else bruto
         print(f"    {repeat.count:>3}x  {repeat.tool:12} {str(argument)[:56]}")
 
     print("\nCONTEXTO")
@@ -276,7 +278,8 @@ def _analyze(args) -> int:
     print(f"  crescimento/turno  mediana {_num(context.median_growth)} · "
           f"média {_num(context.mean_growth)} · p95 {_num(context.p95_growth)}")
     if context.growth_concentration is not None:
-        print(f"  concentração    {context.growth_concentration:.0%} do crescimento vem dos 5% de turnos mais caros")
+        print(f"  concentração    {context.growth_concentration:.0%} do crescimento "
+              f"vem dos 5% de turnos mais caros")
     print(f"  truncamentos    {context.truncations}")
 
     print("\nCACHE")
@@ -285,7 +288,8 @@ def _analyze(args) -> int:
     print(f"  rewrite ratio   {escrito} (escrito por token lido)")
 
     print("\nCUSTO")
-    print(f"  total estimado  US$ {cost.total:,.2f}" + ("" if cost.is_complete else "  (INCOMPLETO)"))
+    lacuna = "" if cost.is_complete else "  (INCOMPLETO)"
+    print(f"  total estimado  US$ {cost.total:,.2f}{lacuna}")
     for model, value in cost.ranked()[:5]:
         print(f"    {model:22} US$ {value:>10,.2f}")
     if not cost.is_complete:
@@ -349,8 +353,12 @@ def _power(args) -> int:
     print(f"\nbaseline: custo por sessão (n={baseline['n']})")
     print(f"  mediana {baseline['median']:,.2f} · média {baseline['mean']:,.2f} · "
           f"p90 {baseline['p90']:,.2f}")
-    print(f"  média/mediana {baseline['mean_over_median']} → "
-          f"{'assimétrico: bootstrap e delta de Cliff são apropriados' if baseline['skewed'] else 'aproximadamente simétrico'}")
+    leitura = (
+        "assimétrico: bootstrap e delta de Cliff são apropriados"
+        if baseline["skewed"]
+        else "aproximadamente simétrico"
+    )
+    print(f"  média/mediana {baseline['mean_over_median']} → {leitura}")
 
     print("\ntarefas pareadas necessárias (poder 0,8):")
     for raw in args.effects.split(","):
