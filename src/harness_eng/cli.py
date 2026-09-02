@@ -4,6 +4,7 @@ CLI do harness-eng.
     harness-eng analyze [dir]        métricas sobre transcripts
     harness-eng compare A.json B.json  comparação pareada com IC e tamanho de efeito
     harness-eng power [dir]          quantas tarefas para detectar uma melhora
+    harness-eng run "tarefa"         roda o harness mínimo e grava o trace nativo
     harness-eng sources              origens de trace disponíveis
 
 ``--redact`` substitui caminho e nome de projeto por hash estável. Existe porque o
@@ -15,17 +16,24 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
+from collections import Counter
 from pathlib import Path
 
+from .core.clients import DEFAULT_MODEL, AnthropicClient, ScriptedClient
+from .core.loop import DEFAULT_MAX_ITERATIONS, AgentLoop
+from .core.ports import ModelError, ModelResponse
+from .core.tools import workspace_registry
 from .metrics.context import profile_cache, profile_context
 from .metrics.cost import cost_per_session, estimate_cost
 from .metrics.loops import detect_loops
 from .metrics.tools import analyse_tools
 from .stats.compare import compare_paired
 from .stats.design import describe_baseline, required_pairs
-from .trace.model import TraceSet
+from .trace.model import StopReason, ToolCall, TraceSet
 from .trace.sources.claude_code import ClaudeCodeSource, default_root
+from .trace.sources.native import NativeSink, NativeSource
 
 __version__ = "0.1.0"
 
@@ -61,6 +69,23 @@ def build_parser() -> argparse.ArgumentParser:
     power.add_argument("--effects", default="0.05,0.1,0.2,0.3",
                        help="melhoras relativas a testar, separadas por vírgula")
 
+    run = sub.add_parser("run", help="roda o harness mínimo e grava o trace nativo")
+    run.add_argument("prompt", help="a tarefa")
+    run.add_argument("--workspace", type=Path, default=Path("."),
+                     help="raiz que as ferramentas de leitura podem enxergar")
+    run.add_argument("--out", type=Path, default=None,
+                     help="onde gravar o trace (padrão: reports/native/<sessão>.jsonl)")
+    run.add_argument("--model", default=_env("HARNESS_MODEL", DEFAULT_MODEL))
+    run.add_argument("--effort", default=_env("HARNESS_EFFORT", "high"),
+                     choices=["low", "medium", "high", "xhigh", "max"])
+    run.add_argument("--max-tokens", type=int, default=int(_env("HARNESS_MAX_TOKENS", "16000")))
+    run.add_argument("--max-iterations", type=int,
+                     default=int(_env("HARNESS_MAX_ITERATIONS", str(DEFAULT_MAX_ITERATIONS))))
+    run.add_argument("--dry-run", action="store_true",
+                     help="roteiro fixo em vez do modelo: exercita o loop inteiro "
+                          "sem chave nem custo")
+    run.add_argument("--json", action="store_true")
+
     sub.add_parser("sources", help="origens de trace disponíveis")
     return parser
 
@@ -73,25 +98,67 @@ def main(argv: list[str] | None = None) -> int:
         return _compare(args)
     if args.command == "power":
         return _power(args)
+    if args.command == "run":
+        return _run(args)
     if args.command == "sources":
         print("claude_code   ~/.claude/projects/**/*.jsonl")
+        print("native        traces do harness deste repositório (harness-eng run)")
         print("openai        (planejado)")
-        print("native        (planejado — o harness deste repositório)")
         return 0
     return 1
 
 
-def _load(root: Path | None) -> tuple[TraceSet, ClaudeCodeSource]:
-    source = ClaudeCodeSource()
+def _env(name: str, fallback: str) -> str:
+    """
+    Configuração por ambiente, com ``.env`` quando ``python-dotenv`` está instalado.
+
+    Sem dependência obrigatória: quem só analisa transcript não instala o extra do
+    harness, e o ``.env`` que só o harness usa não pode virar requisito de import.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        pass
+    else:
+        load_dotenv()
+    return os.environ.get(name) or fallback
+
+
+def _load(root: Path | None) -> tuple[TraceSet, Counter]:
+    """
+    Carrega todo trace legível sob ``root``, de qualquer origem conhecida.
+
+    Cada arquivo é oferecido às origens em ordem, e a primeira que o reconhece fica com
+    ele — é o que a porta ``TraceSource`` promete ao devolver ``None`` em vez de levantar.
+    Na prática as duas origens se excluem sozinhas: o leitor nativo exige a marca de
+    formato na primeira linha, e o do Claude Code não acha turno nenhum num arquivo nativo.
+
+    Sem esse laço, ``analyze`` mediria os harnesses dos outros e não o próprio — o que
+    seria uma piada num repositório que cobra medição de quem escreve harness.
+    """
     resolved = root or default_root()
     if not resolved.exists():
         print(f"erro: diretório de traces não encontrado: {resolved}", file=sys.stderr)
         raise SystemExit(2)
-    traces = TraceSet.of(list(source.sessions(resolved)))
+
+    sources = (NativeSource(), ClaudeCodeSource())
+    sessions = []
+    for path in sorted({p for source in sources for p in source.discover(resolved)}):
+        for source in sources:
+            session = source.load(path)
+            if session is not None and session.turns:
+                sessions.append(session)
+                break
+
+    traces = TraceSet.of(sessions)
     if not traces.sessions:
         print(f"erro: nenhum trace legível em {resolved}", file=sys.stderr)
         raise SystemExit(2)
-    return traces, source
+
+    skipped: Counter = Counter()
+    for source in sources:
+        skipped.update(source.skipped)
+    return traces, skipped
 
 
 def _redact(text: str | None) -> str | None:
@@ -105,7 +172,7 @@ def _redact(text: str | None) -> str | None:
 
 
 def _analyze(args) -> int:
-    traces, source = _load(args.root)
+    traces, skipped_by_reason = _load(args.root)
 
     tools = analyse_tools(traces)
     loops = detect_loops(traces)
@@ -121,7 +188,7 @@ def _analyze(args) -> int:
             "context": context.as_dict(),
             "cache": cache.as_dict(),
             "cost": cost.as_dict(),
-            "adapter_skipped": dict(source.skipped),
+            "adapter_skipped": dict(skipped_by_reason),
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
@@ -164,7 +231,7 @@ def _analyze(args) -> int:
     if not cost.is_complete:
         print(f"  sem preço: {', '.join(cost.unpriced_models)} ({cost.unpriced_tokens:,} tokens)")
 
-    skipped = sum(source.skipped.values())
+    skipped = sum(skipped_by_reason.values())
     if skipped:
         print(f"\n  ({skipped:,} registros ignorados pelo adapter — estado de cliente, não turnos)")
     print()
@@ -229,6 +296,83 @@ def _power(args) -> int:
         print(f"  detectar melhora de {effect:>5.0%}:  {n if n else '> 200'}")
     print()
     return 0
+
+
+def _run(args) -> int:
+    """
+    Roda o harness mínimo, grava o trace nativo e diz como a execução terminou.
+
+    O código de saída é ``0`` só quando o modelo terminou por vontade própria. Bater no
+    teto de iterações, ser cortado por ``max_tokens`` ou morrer de erro de provedor
+    devolvem ``1`` — porque num script de CI as três coisas são "não terminou", e um
+    harness que devolve zero ao ser desligado no meio mente para a automação que o chama.
+    """
+    workspace = args.workspace.resolve()
+    if not workspace.is_dir():
+        print(f"erro: workspace não é um diretório: {workspace}", file=sys.stderr)
+        return 2
+
+    registry = workspace_registry(workspace)
+
+    if args.dry_run:
+        # Roteiro fixo: lista o workspace e encerra. Exercita loop, executor, trace e
+        # métricas de ponta a ponta sem chave e sem custo — o caminho que prova que a
+        # instalação funciona antes de alguém gastar a primeira requisição.
+        client = ScriptedClient(
+            [
+                ModelResponse(
+                    text="vou olhar o diretório",
+                    tool_calls=(ToolCall(id="dry-1", name="list_dir", arguments={"path": "."}),),
+                    stop_reason=StopReason.TOOL_USE,
+                ),
+                ModelResponse(text="(dry-run: sem modelo)", stop_reason=StopReason.END_TURN),
+            ],
+            model=f"{args.model} (dry-run)",
+        )
+    else:
+        try:
+            client = AnthropicClient(
+                model=args.model,
+                max_tokens=args.max_tokens,
+                effort=args.effort,
+                system=(
+                    "Você é um agente de leitura. Use as ferramentas para responder sobre "
+                    "o workspace e pare quando tiver a resposta."
+                ),
+            )
+        except ModelError as exc:
+            print(f"erro: {exc}", file=sys.stderr)
+            return 2
+
+    loop = AgentLoop(client, registry, max_iterations=args.max_iterations, cwd=str(workspace))
+    try:
+        outcome = loop.run(args.prompt)
+    except KeyboardInterrupt:
+        print("\ninterrompido", file=sys.stderr)
+        return 130
+
+    target = args.out or Path("reports") / "native" / f"{outcome.session.id}.jsonl"
+    NativeSink().write(outcome.session, target)
+
+    if args.json:
+        print(json.dumps({**outcome.as_dict(), "trace": str(target)}, indent=2, ensure_ascii=False))
+        return 0 if outcome.status.finished_on_its_own else 1
+
+    usage = outcome.session.total_usage
+    print(f"\n{outcome.status.value.upper()} — {outcome.detail}")
+    print(f"  iterações       {outcome.iterations}/{args.max_iterations}")
+    print(f"  turnos          {outcome.turns}")
+    print(f"  ferramentas     {outcome.tool_calls} chamadas")
+    errors = sum(1 for _, result in outcome.session.paired_calls() if result and result.is_error)
+    if outcome.tool_calls:
+        print(f"  erros           {errors} ({errors / outcome.tool_calls:.0%})")
+    print(f"  tokens          {usage.total_tokens:,} "
+          f"(cache lido {usage.cache_read_tokens:,}, escrito {usage.cache_write_tokens:,})")
+    if usage.cache_hit_rate is not None:
+        print(f"  acerto de cache {usage.cache_hit_rate:.1%}")
+    print(f"  trace           {target}")
+    print(f"\n  medir: harness-eng analyze {target.parent}\n")
+    return 0 if outcome.status.finished_on_its_own else 1
 
 
 if __name__ == "__main__":
