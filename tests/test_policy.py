@@ -9,6 +9,8 @@ avião e não prova nada a mais.
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from harness_eng import Harness
@@ -442,3 +444,42 @@ def test_o_relatorio_sobrevive_a_um_trace_sem_medicao(tmp_path, capsys) -> None:
     assert "CACHE" in saida and "CUSTO" in saida, "o relatório parou no meio"
     # O travessão é a marca de "não deu para medir" — melhor que zero, que seria medição.
     assert "—" in saida
+
+
+def test_o_relatorio_nao_morre_no_console_do_windows() -> None:
+    """
+    Regressão de um bug achado rodando `analyze` sobre 55 transcripts REAIS.
+
+    O console do Windows usa cp1252, e o `←` do marcador de outlier levantava
+    `UnicodeEncodeError` no meio da impressão — o relatório morria depois de já ter
+    escrito metade, com traceback por cima da saída.
+
+    Os 170 testes não pegaram porque rodam sobre traces sintéticos, que não têm outlier:
+    o caractere nunca chegava a ser impresso. É exatamente o modo de falha que este
+    repositório cobra dos outros — comportamento que só aparece com dado real —
+    acontecendo com ele mesmo.
+    """
+    import io
+
+    from harness_eng.cli import _force_utf8_output
+
+    # Stream redirecionado, sem reconfigure(): não pode levantar. Seguir sem a garantia de
+    # acento é correto; derrubar o relatório inteiro, não.
+    class SemReconfigure(io.StringIO):
+        reconfigure = None
+
+    original = sys.stdout
+    sys.stdout = SemReconfigure()
+    try:
+        _force_utf8_output()
+    finally:
+        sys.stdout = original
+
+
+def test_o_marcador_de_outlier_sobrevive_a_um_console_limitado(tmp_path, capsys) -> None:
+    """O `←` precisa chegar ao fim do relatório, não ao meio."""
+    from harness_eng.cli import _force_utf8_output
+
+    _force_utf8_output()
+    print("outlier: ←")
+    assert "←" in capsys.readouterr().out

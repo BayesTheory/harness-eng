@@ -14,6 +14,7 @@ relatório que vaza nome de cliente por descuido é pior que relatório nenhum.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -107,7 +108,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _force_utf8_output() -> None:
+    """
+    Garante que o relatório caiba no console, em vez de matar o processo.
+
+    Bug real, achado rodando ``analyze`` sobre 55 transcripts de verdade: o console do
+    Windows usa cp1252 por padrão, e o ``←`` do marcador de outlier levanta
+    ``UnicodeEncodeError`` **no meio da impressão** — o relatório morre depois de já ter
+    escrito metade.
+
+    Os 170 testes não pegaram porque rodam sobre traces sintéticos, que não têm outlier:
+    o caractere nunca chegava a ser impresso. É o modo de falha que este repositório
+    documenta em outros — comportamento que só aparece com dado real — acontecendo com
+    ele mesmo.
+
+    ``errors="replace"`` em vez de ``"strict"``: um caractere que vira ``?`` é um defeito
+    cosmético; um relatório que morre na metade faz perder a análise inteira.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            # Stream redirecionado para algo que não aceita reconfiguração: seguir é
+            # correto — o relatório ainda sai, só sem a garantia de acento.
+            with contextlib.suppress(ValueError, OSError):
+                reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_output()
     args = build_parser().parse_args(argv)
     if args.command == "analyze":
         return _analyze(args)
